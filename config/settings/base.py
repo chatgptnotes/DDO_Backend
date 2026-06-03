@@ -115,6 +115,31 @@ STRIPE_SECRET_KEY = config("STRIPE_SECRET_KEY", default="")
 STRIPE_PUBLISHABLE_KEY = config("STRIPE_PUBLISHABLE_KEY", default="")
 STRIPE_WEBHOOK_SECRET = config("STRIPE_WEBHOOK_SECRET", default="")
 
+# ---- Stripe Connect --------------------------------------------------------
+# Separate webhook signing secret for the Connect endpoint
+# (/api/payments/webhooks/stripe/connect/). Stripe delivers connected-account
+# events (account.updated) on a distinct endpoint with its own secret — the
+# handler fails closed if this is missing, same as the platform webhook.
+STRIPE_CONNECT_WEBHOOK_SECRET = config("STRIPE_CONNECT_WEBHOOK_SECRET", default="")
+
+# Master switch for routing patient payments through Connect destination
+# charges. When False, payment creation uses the legacy single-account path.
+# Flip to True only once clinics have onboarded (Phase 2 of the rollout plan).
+CONNECT_ENABLED = config("CONNECT_ENABLED", default=False, cast=bool)
+
+# Where Stripe-hosted Express onboarding returns the clinical admin. Both URLs
+# point at the AiSurgeonPilot clinic-admin Payments page: `refresh` re-mints an
+# expired Account Link, `return` lands on the "verifying…" state that polls
+# /api/payments/connect/status/.
+CONNECT_ONBOARDING_RETURN_URL = config(
+    "CONNECT_ONBOARDING_RETURN_URL",
+    default="http://localhost:3000/clinic-admin/payments?stripe=return",
+)
+CONNECT_ONBOARDING_REFRESH_URL = config(
+    "CONNECT_ONBOARDING_REFRESH_URL",
+    default="http://localhost:3000/clinic-admin/payments?stripe=refresh",
+)
+
 # ---- Email -----------------------------------------------------------------
 # Defaults to Django's console backend in dev — flip via env in prod.
 EMAIL_BACKEND = config(

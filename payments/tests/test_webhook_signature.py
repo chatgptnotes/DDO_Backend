@@ -62,18 +62,20 @@ def test_invalid_signature_raises():
 
 
 @override_settings(STRIPE_WEBHOOK_SECRET="whsec_test")
-def test_duplicate_event_short_circuits(fake_event):
-    """Second delivery of the same event_id must not call the dispatch handler."""
+def test_processed_event_short_circuits(fake_event):
+    """A redelivery of an already-PROCESSED event must not dispatch again."""
     with patch("payments.services.webhook_handler.get_stripe") as get_stripe_mock, patch(
-        "payments.services.webhook_handler._record_event_or_duplicate"
-    ) as record_mock, patch(
+        "payments.services.webhook_handler._record_event"
+    ), patch(
+        "payments.services.webhook_handler._already_processed"
+    ) as processed_mock, patch(
         "payments.services.webhook_handler._dispatch"
     ) as dispatch_mock:
         stripe_mod = MagicMock()
         stripe_mod.error.SignatureVerificationError = type("X", (Exception,), {})
         stripe_mod.Webhook.construct_event.return_value = fake_event
         get_stripe_mock.return_value = stripe_mod
-        record_mock.return_value = True  # duplicate
+        processed_mock.return_value = True  # a prior delivery finished
 
         result = handle_webhook(raw_body=b"{}", signature_header="t=1,v1=ok")
 
@@ -82,10 +84,14 @@ def test_duplicate_event_short_circuits(fake_event):
 
 
 @override_settings(STRIPE_WEBHOOK_SECRET="whsec_test")
-def test_first_event_is_dispatched_and_marked_processed(fake_event):
+def test_unprocessed_redelivery_is_reprocessed(fake_event):
+    """Reliability R1: a redelivery whose processed_at is still NULL (an earlier
+    delivery failed mid-dispatch) must be REPROCESSED, not skipped."""
     with patch("payments.services.webhook_handler.get_stripe") as get_stripe_mock, patch(
-        "payments.services.webhook_handler._record_event_or_duplicate"
-    ) as record_mock, patch(
+        "payments.services.webhook_handler._record_event"
+    ), patch(
+        "payments.services.webhook_handler._already_processed"
+    ) as processed_mock, patch(
         "payments.services.webhook_handler._dispatch"
     ) as dispatch_mock, patch(
         "payments.services.webhook_handler._mark_event_processed"
@@ -94,7 +100,31 @@ def test_first_event_is_dispatched_and_marked_processed(fake_event):
         stripe_mod.error.SignatureVerificationError = type("X", (Exception,), {})
         stripe_mod.Webhook.construct_event.return_value = fake_event
         get_stripe_mock.return_value = stripe_mod
-        record_mock.return_value = False  # first time
+        processed_mock.return_value = False  # row exists but never finished
+
+        result = handle_webhook(raw_body=b"{}", signature_header="t=1,v1=ok")
+
+    assert result.duplicate is False
+    dispatch_mock.assert_called_once()
+    mark_processed_mock.assert_called_once_with(event_id="evt_test_001")
+
+
+@override_settings(STRIPE_WEBHOOK_SECRET="whsec_test")
+def test_first_event_is_dispatched_and_marked_processed(fake_event):
+    with patch("payments.services.webhook_handler.get_stripe") as get_stripe_mock, patch(
+        "payments.services.webhook_handler._record_event"
+    ), patch(
+        "payments.services.webhook_handler._already_processed"
+    ) as processed_mock, patch(
+        "payments.services.webhook_handler._dispatch"
+    ) as dispatch_mock, patch(
+        "payments.services.webhook_handler._mark_event_processed"
+    ) as mark_processed_mock:
+        stripe_mod = MagicMock()
+        stripe_mod.error.SignatureVerificationError = type("X", (Exception,), {})
+        stripe_mod.Webhook.construct_event.return_value = fake_event
+        get_stripe_mock.return_value = stripe_mod
+        processed_mock.return_value = False  # first time
 
         result = handle_webhook(raw_body=b"{}", signature_header="t=1,v1=ok")
 
@@ -106,8 +136,10 @@ def test_first_event_is_dispatched_and_marked_processed(fake_event):
 @override_settings(STRIPE_WEBHOOK_SECRET="whsec_test")
 def test_handler_failure_marks_error_and_reraises(fake_event):
     with patch("payments.services.webhook_handler.get_stripe") as get_stripe_mock, patch(
-        "payments.services.webhook_handler._record_event_or_duplicate"
-    ) as record_mock, patch(
+        "payments.services.webhook_handler._record_event"
+    ), patch(
+        "payments.services.webhook_handler._already_processed"
+    ) as processed_mock, patch(
         "payments.services.webhook_handler._dispatch"
     ) as dispatch_mock, patch(
         "payments.services.webhook_handler._mark_event_failed"
@@ -116,7 +148,7 @@ def test_handler_failure_marks_error_and_reraises(fake_event):
         stripe_mod.error.SignatureVerificationError = type("X", (Exception,), {})
         stripe_mod.Webhook.construct_event.return_value = fake_event
         get_stripe_mock.return_value = stripe_mod
-        record_mock.return_value = False
+        processed_mock.return_value = False
         dispatch_mock.side_effect = RuntimeError("downstream boom")
 
         with pytest.raises(RuntimeError, match="downstream boom"):

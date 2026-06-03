@@ -39,6 +39,30 @@ def has_role(user_id: str, *roles: str) -> bool:
         return cur.fetchone() is not None
 
 
+def clinic_scope_id(user_id: str) -> str | None:
+    """Return the clinic id a user administers as `clinical_admin`.
+
+    The `user_roles` row for a `clinical_admin` carries the clinic in
+    `scope_id` (backfilled by `20260520_create_clinics.sql`). This is the
+    authorization anchor for the Stripe Connect endpoints: a clinical admin
+    may only manage the connected account of the clinic they are scoped to.
+
+    Returns None if the user holds no active, clinic-scoped `clinical_admin`
+    role. If they somehow hold more than one, the earliest-granted wins.
+    """
+    with connection.cursor() as cur:
+        cur.execute(
+            "SELECT scope_id::text FROM user_roles "
+            "WHERE user_id = %s AND is_active = true "
+            "  AND role::text = 'clinical_admin' AND scope_id IS NOT NULL "
+            "ORDER BY granted_at "
+            "LIMIT 1",
+            [user_id],
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
 def get_active_role(request, allowed: list[str]) -> str | None:
     """Read the requested active role from the header and validate it.
 

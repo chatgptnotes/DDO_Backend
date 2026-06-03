@@ -14,6 +14,12 @@ Design principles
 * **Idempotency.** Stripe's create call uses an idempotency_key derived
   from `appointment_id` + `attempt_number`, so a network retry never
   produces two PaymentIntents.
+* **Connect routing.** When `CONNECT_ENABLED`, the PaymentIntent is a
+  destination charge — `transfer_data.destination` sends 100% of the payment
+  to the doctor's clinic's connected account. Payment creation is blocked for
+  a clinic that has not finished Stripe onboarding (`charges_enabled` False).
+  A reused intent whose frozen destination no longer matches the clinic's
+  current account is canceled and recreated.
 """
 from __future__ import annotations
 
@@ -47,6 +53,16 @@ class AppointmentAlreadyPaid(PaymentError):
     pass
 
 
+class ClinicNotPayable(PaymentError):
+    """The doctor's clinic cannot accept payments yet.
+
+    Raised when Connect routing is enabled but the clinic has no connected
+    account, or Stripe has not enabled charges on it. The view maps this to
+    HTTP 409 — fail fast and legibly rather than letting the charge error at
+    confirm time.
+    """
+
+
 @dataclass(frozen=True)
 class IntentPayload:
     intent_id: str  # internal UUID
@@ -69,27 +85,56 @@ def create_intent_for_appointment(
     if appt["payment_status"] == "paid":
         raise AppointmentAlreadyPaid("Appointment is already paid.")
 
-    # Reuse a non-terminal intent if one exists.
+    # Resolve the destination clinic and guard the money path. When Connect is
+    # off, `clinic` stays None and payment falls back to the platform account.
+    connect_enabled = bool(getattr(settings, "CONNECT_ENABLED", False))
+    clinic = None
+    if connect_enabled:
+        clinic = _load_clinic_for_appointment(appointment_id)
+        if clinic is None or not clinic["stripe_account_id"] or not clinic["charges_enabled"]:
+            raise ClinicNotPayable(
+                "This clinic has not finished payment setup and cannot accept "
+                "payments yet."
+            )
+
+    # Reuse a non-terminal intent — but only if it still routes to the right
+    # clinic. A PaymentIntent's transfer_data is frozen at creation, so if the
+    # clinic re-onboarded onto a new account, the stale intent must be replaced.
     existing = _load_latest_intent_for_appointment(appointment_id)
     if existing and existing["status"] not in ("succeeded", "canceled"):
-        logger.info(
-            "Reusing existing intent %s for appointment %s (status=%s)",
-            existing["stripe_payment_intent_id"],
-            appointment_id,
-            existing["status"],
+        stale_destination = (
+            connect_enabled
+            and clinic is not None
+            and existing["stripe_connected_account_id"] != clinic["stripe_account_id"]
         )
-        # Re-fetch the client_secret from Stripe — we don't store it.
-        stripe = get_stripe()
-        si = stripe.PaymentIntent.retrieve(existing["stripe_payment_intent_id"])
-        return IntentPayload(
-            intent_id=str(existing["id"]),
-            stripe_payment_intent_id=si.id,
-            client_secret=si.client_secret,
-            publishable_key=settings.STRIPE_PUBLISHABLE_KEY,
-            amount_cents=int(si.amount),
-            currency=si.currency,
-            status=si.status,
-        )
+        if stale_destination:
+            logger.info(
+                "Intent %s routes to %s but clinic now uses %s — "
+                "canceling and recreating",
+                existing["stripe_payment_intent_id"],
+                existing["stripe_connected_account_id"],
+                clinic["stripe_account_id"],
+            )
+            _cancel_stale_intent(existing["stripe_payment_intent_id"])
+        else:
+            logger.info(
+                "Reusing existing intent %s for appointment %s (status=%s)",
+                existing["stripe_payment_intent_id"],
+                appointment_id,
+                existing["status"],
+            )
+            # Re-fetch the client_secret from Stripe — we don't store it.
+            stripe = get_stripe()
+            si = stripe.PaymentIntent.retrieve(existing["stripe_payment_intent_id"])
+            return IntentPayload(
+                intent_id=str(existing["id"]),
+                stripe_payment_intent_id=si.id,
+                client_secret=si.client_secret,
+                publishable_key=settings.STRIPE_PUBLISHABLE_KEY,
+                amount_cents=int(si.amount),
+                currency=si.currency,
+                status=si.status,
+            )
 
     # Need a fresh intent. Resolve fee + customer, then create it.
     doctor = _load_doctor_for_appointment(appointment_id)
@@ -106,22 +151,33 @@ def create_intent_for_appointment(
     next_attempt = (existing["attempt_number"] if existing else 0) + 1
     idempotency_key = f"appt_{appointment_id}_v{next_attempt}"
 
-    stripe = get_stripe()
-    intent = stripe.PaymentIntent.create(
+    metadata = {
+        "appointment_id": str(appointment_id),
+        "patient_id": str(appt["patient_id"]),
+        "doctor_id": str(appt["doctor_id"]),
+        "visit_type": appt["visit_type"] or "physical",
+        "attempt_number": str(next_attempt),
+    }
+    create_kwargs: dict[str, Any] = dict(
         amount=fee.amount_cents,
         currency=fee.currency,
         customer=stripe_customer_id,
         automatic_payment_methods={"enabled": True},
         description=f"AiDocCall consultation #{appointment_id}",
-        metadata={
-            "appointment_id": str(appointment_id),
-            "patient_id": str(appt["patient_id"]),
-            "doctor_id": str(appt["doctor_id"]),
-            "visit_type": appt["visit_type"] or "physical",
-            "attempt_number": str(next_attempt),
-        },
+        metadata=metadata,
         idempotency_key=idempotency_key,
     )
+
+    connected_account_id = None
+    if connect_enabled and clinic is not None:
+        connected_account_id = clinic["stripe_account_id"]
+        metadata["clinic_id"] = str(clinic["clinic_id"])
+        # Destination charge: the full amount is transferred to the clinic's
+        # connected account. No `application_fee_amount` -> 0% platform cut.
+        create_kwargs["transfer_data"] = {"destination": connected_account_id}
+
+    stripe = get_stripe()
+    intent = stripe.PaymentIntent.create(**create_kwargs)
 
     new_id = _insert_intent_row(
         appointment_id=appointment_id,
@@ -131,6 +187,8 @@ def create_intent_for_appointment(
         attempt_number=next_attempt,
         idempotency_key=idempotency_key,
         fee=fee,
+        clinic_id=clinic["clinic_id"] if clinic else None,
+        connected_account_id=connected_account_id,
     )
 
     # Persist the resolved currency back onto the appointment for reporting.
@@ -259,6 +317,39 @@ def _load_doctor_for_appointment(appointment_id: str) -> dict | None:
         return dict(zip(keys, row))
 
 
+def _load_clinic_for_appointment(appointment_id: str) -> dict | None:
+    """Resolve the clinic that should receive payment for an appointment.
+
+    Joins appointment -> doctor -> clinic. Returns None if the doctor is not
+    attached to any clinic. `stripe_account_id` / `charges_enabled` reflect the
+    clinic's current Connect onboarding state.
+    """
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.id::text,
+                   c.stripe_account_id,
+                   c.charges_enabled,
+                   c.onboarding_status
+            FROM public.doc_appointments a
+            JOIN public.doc_doctors d ON d.id = a.doctor_id
+            JOIN public.clinics c ON c.id = d.clinic_id
+            WHERE a.id = %s
+            LIMIT 1
+            """,
+            [appointment_id],
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "clinic_id": row[0],
+            "stripe_account_id": row[1],
+            "charges_enabled": bool(row[2]),
+            "onboarding_status": row[3],
+        }
+
+
 def _load_latest_intent_for_appointment(appointment_id: str) -> dict | None:
     with connection.cursor() as cur:
         cur.execute(
@@ -266,7 +357,8 @@ def _load_latest_intent_for_appointment(appointment_id: str) -> dict | None:
             SELECT id::text,
                    stripe_payment_intent_id,
                    status,
-                   attempt_number
+                   attempt_number,
+                   stripe_connected_account_id
             FROM public.doc_payment_intents
             WHERE appointment_id = %s
             ORDER BY attempt_number DESC
@@ -282,7 +374,33 @@ def _load_latest_intent_for_appointment(appointment_id: str) -> dict | None:
             "stripe_payment_intent_id": row[1],
             "status": row[2],
             "attempt_number": row[3],
+            "stripe_connected_account_id": row[4],
         }
+
+
+def _cancel_stale_intent(stripe_payment_intent_id: str) -> None:
+    """Cancel a PaymentIntent whose destination no longer matches the clinic.
+
+    Best-effort on the Stripe side — the intent may already be uncancelable —
+    but the local row is always flipped to `canceled` so it is not reused.
+    """
+    stripe = get_stripe()
+    try:
+        stripe.PaymentIntent.cancel(stripe_payment_intent_id)
+    except Exception as exc:  # noqa: BLE001 — proceed; a fresh intent replaces it
+        logger.warning(
+            "Could not cancel stale intent %s: %s", stripe_payment_intent_id, exc
+        )
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE public.doc_payment_intents
+               SET status = 'canceled'
+             WHERE stripe_payment_intent_id = %s
+               AND status NOT IN ('succeeded', 'canceled')
+            """,
+            [stripe_payment_intent_id],
+        )
 
 
 @transaction.atomic
@@ -295,6 +413,8 @@ def _insert_intent_row(
     attempt_number: int,
     idempotency_key: str,
     fee: ResolvedFee,
+    clinic_id: str | None = None,
+    connected_account_id: str | None = None,
 ) -> str:
     with connection.cursor() as cur:
         cur.execute(
@@ -303,8 +423,9 @@ def _insert_intent_row(
                 (appointment_id, patient_id,
                  stripe_payment_intent_id, stripe_customer_id,
                  amount_cents, currency, status,
-                 attempt_number, idempotency_key, metadata)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                 attempt_number, idempotency_key, metadata,
+                 clinic_id, stripe_connected_account_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
             RETURNING id::text
             """,
             [
@@ -318,6 +439,8 @@ def _insert_intent_row(
                 attempt_number,
                 idempotency_key,
                 "{}",
+                clinic_id,
+                connected_account_id,
             ],
         )
         return cur.fetchone()[0]

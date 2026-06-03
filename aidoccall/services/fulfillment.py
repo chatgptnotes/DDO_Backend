@@ -60,17 +60,28 @@ def fulfill_appointment(
         )
         return
 
-    send_payment_confirmation(
-        to_email=context["patient_email"],
-        patient_name=context["patient_name"],
-        doctor_name=context["doctor_name"],
-        appointment_date=context["appointment_date"],
-        start_time=context["start_time"],
-        visit_type=context["visit_type"],
-        meeting_link=context["meeting_link"],
-        amount_cents=amount_cents,
-        currency=currency,
-    )
+    # The confirmation email is a non-critical side-effect. It must never fail
+    # the caller: this function runs inside the Stripe webhook request, and a
+    # mail-server outage raising here would 500 the webhook (forcing Stripe to
+    # retry) even though the appointment is already, correctly, marked paid.
+    try:
+        send_payment_confirmation(
+            to_email=context["patient_email"],
+            patient_name=context["patient_name"],
+            doctor_name=context["doctor_name"],
+            appointment_date=context["appointment_date"],
+            start_time=context["start_time"],
+            visit_type=context["visit_type"],
+            meeting_link=context["meeting_link"],
+            amount_cents=amount_cents,
+            currency=currency,
+        )
+    except Exception as exc:  # noqa: BLE001 — payment state is committed; email is best-effort
+        logger.warning(
+            "Appointment %s fulfilled but confirmation email failed: %s",
+            appointment_id,
+            exc,
+        )
 
 
 def refund_appointment(*, appointment_id: str) -> None:
