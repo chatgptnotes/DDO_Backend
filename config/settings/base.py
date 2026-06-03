@@ -92,10 +92,42 @@ REST_FRAMEWORK = {
     "UNAUTHENTICATED_USER": None,
 }
 
+# ---- Consultation transcription -------------------------------------------
+# Audio uploads for in-person consultation transcription. Default 25 MB covers
+# a long consult of compressed opus; raise both together if needed. The
+# DATA_UPLOAD limit must allow the multipart envelope to exceed the in-memory
+# FILE_UPLOAD threshold (Django spools larger files to a temp file).
+FILE_UPLOAD_MAX_MEMORY_SIZE = config(
+    "FILE_UPLOAD_MAX_MEMORY_SIZE", default=25 * 1024 * 1024, cast=int
+)
+DATA_UPLOAD_MAX_MEMORY_SIZE = config(
+    "DATA_UPLOAD_MAX_MEMORY_SIZE", default=26 * 1024 * 1024, cast=int
+)
+
+# Speech-to-text engine. 'google' = free SpeechRecognition Google Web Speech
+# backend (requires ffmpeg on the host). 'whisper'/'gemini' reserved for later.
+TRANSCRIPTION_ENGINE = config("TRANSCRIPTION_ENGINE", default="google")
+
 # ---- Supabase JWT ----------------------------------------------------------
+# Legacy symmetric secret (HS256). Still used for HS256-signed tokens and the
+# test suite. Newer Supabase projects sign access tokens asymmetrically
+# (ES256/RS256) with rotating keys — those are verified against the project's
+# public JWKS instead (see SUPABASE_JWKS_URL below).
 SUPABASE_JWT_SECRET = config("SUPABASE_JWT_SECRET")
 SUPABASE_JWT_AUDIENCE = config("SUPABASE_JWT_AUDIENCE", default="authenticated")
 SUPABASE_JWT_ALGORITHM = config("SUPABASE_JWT_ALGORITHM", default="HS256")
+
+# Public JWKS endpoint for asymmetric (ES256/RS256) access tokens. Defaults to
+# the project's well-known URL derived from SUPABASE_URL; override only if needed.
+_SUPABASE_URL_FOR_JWKS = config("SUPABASE_URL", default="").rstrip("/")
+SUPABASE_JWKS_URL = config(
+    "SUPABASE_JWKS_URL",
+    default=(
+        f"{_SUPABASE_URL_FOR_JWKS}/auth/v1/.well-known/jwks.json"
+        if _SUPABASE_URL_FOR_JWKS
+        else ""
+    ),
+)
 
 # Supabase project URL + service-role key — used for privileged operations
 # (auth.admin.createUser, sending invite emails). Service role bypasses RLS,
