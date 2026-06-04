@@ -1,0 +1,27 @@
+{
+  "name": "DDO_Backend",
+  "version": "1.0.0",
+  "description": "Django REST API backend for AiSurgeonPilot and aidoccall.com with Stripe Connect payments",
+  "homepage": "https://github.com/chatgptnotes/DDO_Backend#readme",
+  "bugs": {
+    "url": "https://github.com/chatgptnotes/DDO_Backend/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chatgptnotes/DDO_Backend.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "main": "manage.py",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "start": "venv\\Scripts\\python.exe manage.py runserver",
+    "dev": "venv\\Scripts\\python.exe manage.py runserver",
+    "prod": "venv\\Scripts\\python.exe -m gunicorn config.wsgi:application --bind 0.0.0.0:8000",
+    "migrate": "venv\\Scripts\\python.exe manage.py migrate",
+    "test": "venv\\Scripts\\pytest.exe",
+    "test:coverage": "venv\\Scripts\\pytest.exe --cov"
+  }
+}
