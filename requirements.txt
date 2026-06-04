@@ -2,11 +2,21 @@ Django>=5.0,<5.2
 djangorestframework>=3.15,<3.16
 django-cors-headers>=4.3
 pyjwt>=2.8
+# ES256/RS256 verification of Supabase asymmetric JWTs (new signing keys).
+cryptography>=42
 psycopg[binary]>=3.1
 python-decouple>=3.8
 gunicorn>=22.0
 whitenoise>=6.7
 stripe>=8.0,<9
+
+# Consultation transcription (in-person doctor/patient audio → text).
+# Requires the `ffmpeg` system binary on the host (pydub shells out to it).
+# audioop-lts / standard-aifc backfill stdlib modules removed in Python 3.13+.
+SpeechRecognition>=3.14
+pydub>=0.25
+audioop-lts>=0.2; python_version >= "3.13"
+standard-aifc>=3.13; python_version >= "3.13"
 
 # Dev / test
 pytest>=8.2
