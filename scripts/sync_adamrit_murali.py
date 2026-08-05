@@ -555,7 +555,8 @@ def _build_report(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _run_sync(args: argparse.Namespace) -> int:
+def run_sync(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the import and return a non-PHI summary for API/worker callers."""
     source_config = ProjectConfig(
         label="Adamrit",
         url=_env("ADAMRIT_SUPABASE_URL") or _env("SOURCE_SUPABASE_URL") or "",
@@ -692,10 +693,25 @@ def _run_sync(args: argparse.Namespace) -> int:
 
     if args.report_md:
         Path(args.report_md).write_text(report, encoding="utf-8")
-        print(f"Wrote report: {args.report_md}")
 
-    print(report)
-    return 0
+    return {
+        "source_counts": counts.source_rows,
+        "target_counts": counts.target_rows,
+        "notes": counts.notes,
+        "report": report,
+    }
+
+
+def sync_adamrit_murali() -> dict[str, Any]:
+    """Run the production Dr. BK Murali sync from a trusted backend worker."""
+    return run_sync(
+        argparse.Namespace(
+            source_doctor=DEFAULT_SOURCE_IDENTIFIER,
+            target_doctor=DEFAULT_TARGET_IDENTIFIER,
+            dry_run=False,
+            report_md="",
+        )
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -729,7 +745,11 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        return _run_sync(args)
+        result = run_sync(args)
+        if args.report_md:
+            print(f"Wrote report: {args.report_md}")
+        print(result["report"])
+        return 0
     except Exception as exc:  # noqa: BLE001 - this is a batch sync tool
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

@@ -11,6 +11,9 @@ reset all stay with Supabase.
 """
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +48,36 @@ class SupabaseUser:
 class SupabaseJWTAuthentication(BaseAuthentication):
     keyword = "Bearer"
 
+    @staticmethod
+    def _validate_with_supabase(token: str) -> dict[str, Any] | None:
+        """Validate a session against Supabase when a local signing key is stale.
+
+        Supabase can rotate JWT signing keys. The normal local verification path
+        stays preferred; this fallback uses the project's authenticated `/user`
+        endpoint and never exposes backend secrets to the client.
+        """
+        if not settings.SUPABASE_URL or not settings.SUPABASE_ANON_KEY:
+            return None
+
+        request = urllib.request.Request(
+            f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1/user",
+            method="GET",
+            headers={
+                "apikey": settings.SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            return None
+
+        if not isinstance(payload, dict) or not payload.get("id"):
+            return None
+        return payload
+
     def authenticate(self, request: Request):
         header = request.headers.get("Authorization", "")
         if not header:
@@ -67,7 +100,13 @@ class SupabaseJWTAuthentication(BaseAuthentication):
         except jwt.InvalidAudienceError as exc:
             raise AuthenticationFailed("Invalid token audience") from exc
         except jwt.InvalidTokenError as exc:
-            raise AuthenticationFailed("Invalid token") from exc
+            supabase_user = self._validate_with_supabase(token)
+            if not supabase_user:
+                raise AuthenticationFailed("Invalid token") from exc
+            payload = {
+                "sub": str(supabase_user["id"]),
+                "email": supabase_user.get("email"),
+            }
 
         user_id = payload.get("sub")
         if not user_id:

@@ -68,3 +68,20 @@ class Doctor(models.Model):
 
     def __str__(self) -> str:
         return self.full_name or self.email
+
+
+class AdamritSyncJob(models.Model):
+    """Durable queue entry for a server-only Adamrit import."""
+
+    id = models.UUIDField(primary_key=True)
+    requested_by_id = models.UUIDField()
+    status = models.CharField(max_length=16)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(blank=True, null=True)
+    finished_at = models.DateTimeField(blank=True, null=True)
+    result_summary = models.JSONField(blank=True, null=True)
+    error_message = models.TextField(blank=True, null=True)
+
+    class Meta:
+        managed = False
+        db_table = "adamrit_sync_jobs"
