@@ -174,6 +174,16 @@ python manage.py collectstatic --noinput
 gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 4
 ```
 
+For the Dr. Murali Adamrit sync button, run one additional worker process:
+
+```bash
+python manage.py process_adamrit_sync_jobs
+```
+
+Apply `supabase/migrations/20260805_create_adamrit_sync_jobs.sql` before starting
+the worker, and configure both Adamrit and DDO service-role credentials from
+`.env.example` on the backend only.
+
 Environment for prod:
 - `DJANGO_SETTINGS_MODULE=config.settings.prod`
 - All values from `.env.example` filled with real prod credentials.

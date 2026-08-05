@@ -134,6 +134,7 @@ SUPABASE_JWKS_URL = config(
 # so it must NEVER reach the browser. Empty defaults so dev environments
 # without these set still boot; views that need them raise a clear error.
 SUPABASE_URL = config("SUPABASE_URL", default="")
+SUPABASE_ANON_KEY = config("SUPABASE_ANON_KEY", default="")
 SUPABASE_SERVICE_ROLE_KEY = config("SUPABASE_SERVICE_ROLE_KEY", default="")
 
 # ---- CORS ------------------------------------------------------------------
