@@ -6,7 +6,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
-from scripts.sync_adamrit_murali import sync_adamrit_murali
+from scripts.pull_adamrit_murali import sync_adamrit_murali
 from surgeonpilot.models import AdamritSyncJob
 
 

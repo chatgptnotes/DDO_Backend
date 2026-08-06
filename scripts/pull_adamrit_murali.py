@@ -97,10 +97,8 @@ def normalize_gender(value: Any) -> str:
     return "male" if value in {"m", "male", "man"} else "female" if value in {"f", "female", "woman"} else "other"
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
+def run_sync(*, dry_run: bool = False) -> dict[str, Any]:
+    """Import Dr. Murali's Adamrit visits into DDO and return a safe summary."""
     source = Rest(os.environ["ADAMRIT_SUPABASE_URL"], os.environ["ADAMRIT_SUPABASE_SERVICE_ROLE_KEY"], "Adamrit")
     target_url = os.environ.get("DDO_SUPABASE_URL") or os.environ.get("SUPABASE_URL")
     target_key = os.environ.get("DDO_SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -182,12 +180,41 @@ def main() -> int:
     item_rows = [{"id": row.get("id"), "prescription_id": row.get("prescription_id"), "medication_name": row.get("medicine_name") or row.get("generic_name") or row.get("brand_name") or "Unknown", "dosage": row.get("dosage_timing") or "Not specified", "frequency": row.get("dosage_frequency") or "Not specified", "duration": str(row.get("duration_days") or ""), "instructions": row.get("special_instructions"), "quantity": str(row.get("quantity_prescribed") or "") } for row in prescription_items]
     followup_rows = [{"id": stable_id("followup", str(row["id"])), "doctor_id": target_doctor_id, "patient_id": patient_id_map.get(str(row.get("patient_id"))), "appointment_id": row.get("id"), "followup_date": row.get("follow_up_date"), "notes": row.get("follow_up_notes"), "status": "pending"} for row in followups]
     counts = {"patients": len(patient_rows), "appointments": len(appointment_rows), "medical_history": len(medical_rows), "consultation_notes": len(note_rows), "prescriptions": len(prescription_rows), "prescription_items": len(item_rows), "followups": len(followup_rows), "payment_rows_detected_not_imported": len(payments), "diagnosis_links": len(visit_diagnoses), "diagnosis_catalog_rows": len(diagnoses)}
-    print(json.dumps({"target_doctor": target_doctors[0], "source_scope": "visits.appointment_with contains Murali", "dry_run": args.dry_run, "counts": counts}, indent=2))
-    if args.dry_run:
-        return 0
+    result = {
+        "source_counts": {
+            "visits": len(visits),
+            "patients": len(patients),
+            "visit_medical_data": len(medical),
+            "visit_diagnoses": len(visit_diagnoses),
+            "prescriptions": len(prescriptions),
+            "prescription_items": len(prescription_items),
+        },
+        "target_counts": {},
+        "notes": [
+            "Source scope: Adamrit visits whose appointment_with contains Murali.",
+            f"Payment rows detected but not imported: {len(payments)}.",
+        ],
+        "dry_run": dry_run,
+    }
+    if dry_run:
+        return result
+
     for table, rows in [("doc_patients", patient_rows), ("doc_patient_doctor_selections", selections), ("doc_patient_medical_history", medical_rows), ("doc_appointments", appointment_rows), ("doc_consultation_notes", note_rows), ("doc_prescriptions", prescription_rows), ("doc_prescription_items", item_rows), ("doc_followups", followup_rows)]:
-        print(f"Writing {table}: {target.upsert(table, rows)}")
-    print(f"Payment rows detected but not written to Stripe tables: {len(payments)}")
+        result["target_counts"][table] = target.upsert(table, rows)
+    return result
+
+
+def sync_adamrit_murali() -> dict[str, Any]:
+    """Worker entry point for the real Adamrit schema (visits/patients/doctors)."""
+    return run_sync()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    result = run_sync(dry_run=args.dry_run)
+    print(json.dumps(result, indent=2))
     return 0
 
 
