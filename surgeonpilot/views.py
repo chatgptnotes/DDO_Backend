@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import uuid
 
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.generics import ListAPIView
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -19,8 +20,17 @@ from rest_framework.views import APIView
 
 from core.permissions import HasRole
 
-from .models import AdamritSyncJob, Doctor
-from .serializers import DoctorSerializer
+from .models import (
+    AdamritSyncJob,
+    DpdpDeletionRequest,
+    DpdpRetentionRule,
+    Doctor,
+)
+from .serializers import (
+    DpdpDeletionRequestSerializer,
+    DpdpRetentionRuleSerializer,
+    DoctorSerializer,
+)
 from .services.transcription import (
     DEFAULT_LANGUAGE,
     TranscriptionError,
@@ -195,3 +205,156 @@ class AdamritSyncJobStatusView(APIView):
                 {"detail": "Sync job not found."}, status=status.HTTP_404_NOT_FOUND
             )
         return Response(_job_payload(job))
+
+
+# =====================================================
+# DPDP Data Deletion Views (Admin Only)
+# =====================================================
+
+
+class DpdpRetentionRuleListView(ListAPIView):
+    """List all retention rules. Superadmin only."""
+
+    serializer_class = DpdpRetentionRuleSerializer
+    permission_classes = [IsAuthenticated, HasRole("superadmin")]
+    pagination_class = None
+
+    def get_queryset(self):
+        return DpdpRetentionRule.objects.filter(is_active=True).order_by("priority")
+
+
+class DpdpDeletionRequestListView(ListAPIView):
+    """List all deletion requests. Superadmin only."""
+
+    serializer_class = DpdpDeletionRequestSerializer
+    permission_classes = [IsAuthenticated, HasRole("superadmin")]
+
+    def get_queryset(self):
+        return DpdpDeletionRequest.objects.all().order_by("-created_at")
+
+
+class CreateManualDeletionRequestView(APIView):
+    """Manually create a deletion request for a patient. Superadmin only.
+
+    POST /api/surgeon/dpdp/deletion-requests/
+        {
+            "patient_id": "uuid",
+            "reason": "Optional reason for manual deletion"
+        }
+    """
+
+    permission_classes = [IsAuthenticated, HasRole("superadmin")]
+
+    def post(self, request):
+        patient_id = request.data.get("patient_id")
+        reason = request.data.get("reason", "Admin manual deletion")
+
+        if not patient_id:
+            return Response(
+                {"detail": "patient_id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            patient_id_uuid = uuid.UUID(patient_id)
+        except ValueError:
+            return Response(
+                {"detail": "Invalid patient_id format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Check if patient exists
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT id, email FROM doc_patients WHERE id = %s",
+                [patient_id_uuid],
+            )
+            patient = cur.fetchone()
+
+            if not patient:
+                return Response(
+                    {"detail": "Patient not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            patient_email = patient[1]
+
+        # Check for pending deletion request
+        existing = DpdpDeletionRequest.objects.filter(
+            patient_id=patient_id_uuid,
+            status__in=["pending", "in_progress"],
+        ).first()
+
+        if existing:
+            serializer = DpdpDeletionRequestSerializer(existing)
+            return Response(
+                {
+                    "detail": "Pending deletion request already exists.",
+                    "request": serializer.data,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # Create deletion request
+        deletion_request = DpdpDeletionRequest.objects.create(
+            id=uuid.uuid4(),
+            patient_id=patient_id_uuid,
+            patient_email=patient_email,
+            request_type="admin_manual",
+            reason=reason,
+            status="pending",
+            created_by=request.user.id,
+        )
+
+        serializer = DpdpDeletionRequestSerializer(deletion_request)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class DpdpDeletionRequestDetailView(APIView):
+    """Get details of a specific deletion request. Superadmin only."""
+
+    permission_classes = [IsAuthenticated, HasRole("superadmin")]
+
+    def get(self, request, request_id):
+        try:
+            deletion_request = DpdpDeletionRequest.objects.get(id=request_id)
+        except DpdpDeletionRequest.DoesNotExist:
+            return Response(
+                {"detail": "Deletion request not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = DpdpDeletionRequestSerializer(deletion_request)
+        return Response(serializer.data)
+
+
+class CancelDeletionRequestView(APIView):
+    """Cancel a pending deletion request. Superadmin only.
+
+    DELETE /api/surgeon/dpdp/deletion-requests/<request_id>/cancel
+    """
+
+    permission_classes = [IsAuthenticated, HasRole("superadmin")]
+
+    def delete(self, request, request_id):
+        try:
+            deletion_request = DpdpDeletionRequest.objects.get(id=request_id)
+        except DpdpDeletionRequest.DoesNotExist:
+            return Response(
+                {"detail": "Deletion request not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if deletion_request.status not in ["pending", "in_progress"]:
+            return Response(
+                {"detail": "Cannot cancel a completed or failed request."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        deletion_request.status = "cancelled"
+        deletion_request.completed_at = timezone.now()
+        deletion_request.save(update_fields=["status", "completed_at"])
+
+        serializer = DpdpDeletionRequestSerializer(deletion_request)
+        return Response(serializer.data)
+

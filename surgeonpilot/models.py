@@ -7,6 +7,8 @@ and are applied through the Supabase SQL editor, not Django.
 Generated with `python manage.py inspectdb <table>` against the Supabase
 Postgres, then renamed for clarity.
 """
+from __future__ import annotations
+
 from django.db import models
 
 
@@ -85,3 +87,69 @@ class AdamritSyncJob(models.Model):
     class Meta:
         managed = False
         db_table = "adamrit_sync_jobs"
+
+
+# DPDP Data Deletion Models
+
+
+class DpdpRetentionRule(models.Model):
+    """Retention configuration for each data type per DPDP requirements."""
+
+    id = models.UUIDField(primary_key=True)
+    table_name = models.TextField(unique=True)
+    retention_years = models.IntegerField(blank=True, null=True)
+    delete_cascade = models.BooleanField(default=True)
+    description = models.TextField(blank=True, null=True)
+    priority = models.IntegerField(default=100)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "doc_dpdp_retention_rules"
+
+
+class DpdpDeletionRequest(models.Model):
+    """Tracks automated and manual patient data deletion requests."""
+
+    id = models.UUIDField(primary_key=True)
+    reference_number = models.TextField(unique=True)
+    patient_id = models.UUIDField(blank=True, null=True)
+    patient_email = models.TextField(blank=True, null=True)
+    request_type = models.TextField(default="auto_retention")
+    reason = models.TextField(blank=True, null=True)
+    status = models.TextField(default="pending")
+    started_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    error_message = models.TextField(blank=True, null=True)
+    tables_to_delete = models.JSONField(default=list)
+    deletion_summary = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.UUIDField(blank=True, null=True)
+    grievance_id = models.UUIDField(blank=True, null=True)
+
+    class Meta:
+        managed = False
+        db_table = "doc_dpdp_deletion_requests"
+
+
+class DpdpDeletionAudit(models.Model):
+    """Audit log of all deletion actions (retained indefinitely for compliance)."""
+
+    id = models.UUIDField(primary_key=True)
+    deletion_request_id = models.UUIDField(blank=True, null=True)
+    table_name = models.TextField()
+    record_id = models.UUIDField(blank=True, null=True)
+    record_type = models.TextField(blank=True, null=True)
+    deleted_fields = models.JSONField(default=list, blank=True)
+    record_summary = models.TextField(blank=True, null=True)
+    execution_time = models.DateTimeField(auto_now_add=True)
+    executed_by = models.TextField(blank=True, null=True)
+    status = models.TextField()
+    error_details = models.TextField(blank=True, null=True)
+
+    class Meta:
+        managed = False
+        db_table = "doc_dpdp_deletion_audit"

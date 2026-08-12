@@ -15,7 +15,11 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from .models import Doctor
+from .models import (
+    DpdpDeletionRequest,
+    DpdpRetentionRule,
+    Doctor,
+)
 
 
 class SupabaseDateTimeField(serializers.DateTimeField):
@@ -39,3 +43,28 @@ class DoctorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Doctor
         fields = "__all__"
+
+
+class DpdpRetentionRuleSerializer(serializers.ModelSerializer):
+    """Serialize retention rules configuration."""
+
+    created_at = SupabaseDateTimeField(allow_null=True, required=False)
+    updated_at = SupabaseDateTimeField(allow_null=True, required=False)
+
+    class Meta:
+        model = DpdpRetentionRule
+        fields = "__all__"
+
+
+class DpdpDeletionRequestSerializer(serializers.ModelSerializer):
+    """Serialize deletion request tracking."""
+
+    created_at = SupabaseDateTimeField(allow_null=True, required=False)
+    updated_at = SupabaseDateTimeField(allow_null=True, required=False)
+    started_at = SupabaseDateTimeField(allow_null=True, required=False)
+    completed_at = SupabaseDateTimeField(allow_null=True, required=False)
+
+    class Meta:
+        model = DpdpDeletionRequest
+        fields = "__all__"
+
