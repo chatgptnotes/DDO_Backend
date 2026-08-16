@@ -153,3 +153,47 @@ class DpdpDeletionAudit(models.Model):
     class Meta:
         managed = False
         db_table = "doc_dpdp_deletion_audit"
+
+
+# DPDP Patient Consent Models
+
+
+class DpdpProcessingPurpose(models.Model):
+    """Central registry of lawful purposes for patient data processing."""
+
+    purpose_code = models.TextField(primary_key=True)
+    purpose_name = models.TextField()
+    legal_basis = models.TextField()  # contract, consent, legal_obligation, vital_interest, public_interest, legitimate_interest
+    is_mandatory = models.BooleanField(default=True)
+    abdm_purpose_map = models.TextField(blank=True, null=True)
+    processing_categories = models.JSONField(default=list, blank=True)
+    data_categories = models.JSONField(default=list, blank=True)
+    description = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "doc_dpdp_processing_purposes"
+
+
+class PatientConsentPreference(models.Model):
+    """Tracks patient consent preferences for optional processing purposes."""
+
+    id = models.UUIDField(primary_key=True)
+    patient_id = models.UUIDField()
+    purpose_code = models.TextField()
+    consent_granted = models.BooleanField(default=False)
+    granted_at = models.DateTimeField(blank=True, null=True)
+    revoked_at = models.DateTimeField(blank=True, null=True)
+    last_updated_at = models.DateTimeField(auto_now=True)
+    consent_source = models.TextField(default="manual")  # manual, abdm, implicit, legacy
+    consent_metadata = models.JSONField(default=dict, blank=True)
+    tenant_id = models.UUIDField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "doc_patient_consent_preferences"
+        unique_together = [["patient_id", "purpose_code"]]

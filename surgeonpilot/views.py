@@ -23,13 +23,17 @@ from core.permissions import HasRole
 from .models import (
     AdamritSyncJob,
     DpdpDeletionRequest,
+    DpdpProcessingPurpose,
     DpdpRetentionRule,
     Doctor,
+    PatientConsentPreference,
 )
 from .serializers import (
     DpdpDeletionRequestSerializer,
+    DpdpProcessingPurposeSerializer,
     DpdpRetentionRuleSerializer,
     DoctorSerializer,
+    PatientConsentPreferenceSerializer,
 )
 from .services.transcription import (
     DEFAULT_LANGUAGE,
@@ -357,4 +361,455 @@ class CancelDeletionRequestView(APIView):
 
         serializer = DpdpDeletionRequestSerializer(deletion_request)
         return Response(serializer.data)
+
+
+# =====================================================
+# Patient Consent Management Views
+# =====================================================
+
+
+class ProcessingPurposeListView(ListAPIView):
+    """List all processing purposes with patient consent status.
+
+    GET /api/surgeon/processing-purposes/
+    GET /api/surgeon/processing-purposes/?patient_id=<uuid>
+    """
+
+    serializer_class = DpdpProcessingPurposeSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return DpdpProcessingPurpose.objects.all().order_by("-is_mandatory", "purpose_name")
+
+    def list(self, request, *args, **kwargs):
+        """Return purposes with current patient consent status if patient_id provided."""
+        queryset = self.filter_queryset(self.get_queryset())
+        patient_id = request.query_params.get("patient_id")
+
+        # First, get all purposes
+        purposes = DpdpProcessingPurposeSerializer(queryset, many=True).data
+
+        # If patient_id provided, fetch their consent preferences
+        consent_map = {}
+        if patient_id:
+            try:
+                patient_id_uuid = uuid.UUID(patient_id)
+                preferences = PatientConsentPreference.objects.filter(
+                    patient_id=patient_id_uuid
+                )
+                for pref in preferences:
+                    consent_map[pref.purpose_code] = {
+                        "consent_granted": pref.consent_granted,
+                        "granted_at": pref.granted_at.isoformat() if pref.granted_at else None,
+                        "revoked_at": pref.revoked_at.isoformat() if pref.revoked_at else None,
+                        "last_updated_at": pref.last_updated_at.isoformat() if pref.last_updated_at else None,
+                        "consent_source": pref.consent_source,
+                    }
+            except ValueError:
+                pass  # Invalid UUID, continue without consent data
+
+        # Attach consent status to each purpose
+        for purpose in purposes:
+            purpose_code = purpose["purpose_code"]
+            if purpose_code in consent_map:
+                purpose["consent"] = consent_map[purpose_code]
+            elif not purpose["is_mandatory"]:
+                # Optional purpose with no consent recorded = not consented
+                purpose["consent"] = {"consent_granted": False}
+            # Mandatory purposes are always considered consented (service contract)
+
+        return Response(purposes)
+
+
+class PatientConsentStatusView(APIView):
+    """Get or update patient consent preferences.
+
+    GET /api/surgeon/patient-consent/<patient_id>/
+    POST /api/surgeon/patient-consent/<patient_id>/
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, patient_id):
+        """Get patient's current consent status for all purposes."""
+        try:
+            patient_id_uuid = uuid.UUID(patient_id)
+        except ValueError:
+            return Response(
+                {"detail": "Invalid patient_id format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Use the database function to get consent status
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM get_patient_consent_status(%s)",
+                [patient_id_uuid],
+            )
+            columns = [desc[0] for desc in cur.description]
+            results = []
+            for row in cur.fetchall():
+                results.append(dict(zip(columns, row)))
+
+        return Response(results)
+
+    def post(self, request, patient_id):
+        """Update patient consent for specific purposes.
+
+        POST body: {
+          "consents": [
+            {"purpose_code": "DATA_EXPORT", "consent_granted": true},
+            {"purpose_code": "ABDM_HI_ACCESS", "consent_granted": false}
+          ],
+          "tenant_id": "<doctor_id>"  // optional
+        }
+        """
+        try:
+            patient_id_uuid = uuid.UUID(patient_id)
+        except ValueError:
+            return Response(
+                {"detail": "Invalid patient_id format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        consents = request.data.get("consents", [])
+        tenant_id = request.data.get("tenant_id")
+
+        if not isinstance(consents, list):
+            return Response(
+                {"detail": "consents must be an array"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        results = []
+        errors = []
+
+        for consent_item in consents:
+            purpose_code = consent_item.get("purpose_code")
+            consent_granted = consent_item.get("consent_granted")
+
+            if not purpose_code or consent_granted is None:
+                errors.append({
+                    "purpose_code": purpose_code,
+                    "error": "Missing purpose_code or consent_granted"
+                })
+                continue
+
+            # Check if purpose is mandatory (cannot be revoked)
+            try:
+                purpose = DpdpProcessingPurpose.objects.get(purpose_code=purpose_code)
+                if purpose.is_mandatory and not consent_granted:
+                    errors.append({
+                        "purpose_code": purpose_code,
+                        "error": "Cannot revoke mandatory processing purpose"
+                    })
+                    continue
+            except DpdpProcessingPurpose.DoesNotExist:
+                errors.append({
+                    "purpose_code": purpose_code,
+                    "error": "Processing purpose not found"
+                })
+                continue
+
+            # Use the database function to set consent
+            with connection.cursor() as cur:
+                cur.execute(
+                    "SELECT set_patient_consent(%s, %s, %s, 'manual', %s)",
+                    [
+                        patient_id_uuid,
+                        purpose_code,
+                        consent_granted,
+                        tenant_id,
+                    ],
+                )
+                result = cur.fetchone()[0]
+
+            results.append({
+                "purpose_code": purpose_code,
+                "consent_granted": consent_granted,
+                "success": result.get("success", False),
+            })
+
+        return Response({
+            "updated": results,
+            "errors": errors,
+        })
+
+
+class PatientConsentAuditView(APIView):
+    """Get audit trail of patient consent changes.
+
+    GET /api/surgeon/patient-consent/<patient_id>/audit
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, patient_id):
+        """Get audit history of consent changes for a patient."""
+        try:
+            patient_id_uuid = uuid.UUID(patient_id)
+        except ValueError:
+            return Response(
+                {"detail": "Invalid patient_id format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        preferences = PatientConsentPreference.objects.filter(
+            patient_id=patient_id_uuid
+        ).order_by("-last_updated_at")
+
+        serializer = PatientConsentPreferenceSerializer(preferences, many=True)
+        return Response(serializer.data)
+
+
+# =====================================================
+# Patient Data Deletion Views (Patient Portal)
+# =====================================================
+
+
+class PatientDeletionRequestView(APIView):
+    """Create a deletion request for the authenticated patient's own data.
+
+    POST /api/surgeon/patient/deletion-request
+        {
+            "reason": "Optional reason for deletion request"
+        }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """Create a deletion request for the authenticated patient."""
+        patient_id = request.data.get("patient_id")
+        reason = request.data.get("reason", "")
+
+        # If patient_id not provided, try to find patient record from user
+        if not patient_id:
+            with connection.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM doc_patients WHERE user_id = %s",
+                    [request.user.id],
+                )
+                patient = cur.fetchone()
+                if not patient:
+                    return Response(
+                        {"detail": "Patient record not found for this user."},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+                patient_id = str(patient[0])
+
+        try:
+            patient_id_uuid = uuid.UUID(patient_id)
+        except ValueError:
+            return Response(
+                {"detail": "Invalid patient_id format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Verify the patient belongs to the requesting user
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT id, email FROM doc_patients WHERE id = %s AND user_id = %s",
+                [patient_id_uuid, request.user.id],
+            )
+            patient = cur.fetchone()
+
+            if not patient:
+                return Response(
+                    {"detail": "Patient not found or access denied."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            patient_email = patient[1]
+
+        # Check for pending deletion request
+        existing = DpdpDeletionRequest.objects.filter(
+            patient_id=patient_id_uuid,
+            status__in=["pending", "in_progress"],
+        ).first()
+
+        if existing:
+            serializer = DpdpDeletionRequestSerializer(existing)
+            return Response(
+                {
+                    "detail": "Pending deletion request already exists.",
+                    "request": serializer.data,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # Generate reference number
+        import random
+        import string
+        ref_chars = string.ascii_uppercase + string.digits
+        reference_number = f"DEL-{ ''.join(random.choices(ref_chars, k=8)) }"
+
+        # Create deletion request
+        deletion_request = DpdpDeletionRequest.objects.create(
+            id=uuid.uuid4(),
+            reference_number=reference_number,
+            patient_id=patient_id_uuid,
+            patient_email=patient_email,
+            request_type="patient_request",
+            reason=reason,
+            status="pending",
+            created_by=request.user.id,
+        )
+
+        serializer = DpdpDeletionRequestSerializer(deletion_request)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class PatientDeletionHistoryView(APIView):
+    """Get deletion request history for the authenticated patient.
+
+    GET /api/surgeon/patient/deletion-history
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Get all deletion requests for the authenticated patient."""
+        # Find patient record for this user
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM doc_patients WHERE user_id = %s",
+                [request.user.id],
+            )
+            patient = cur.fetchone()
+
+            if not patient:
+                return Response(
+                    {"detail": "Patient record not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            patient_id = patient[0]
+
+        # Get all deletion requests for this patient
+        deletion_requests = DpdpDeletionRequest.objects.filter(
+            patient_id=patient_id
+        ).order_by("-created_at")
+
+        serializer = DpdpDeletionRequestSerializer(deletion_requests, many=True)
+        return Response(serializer.data)
+
+
+class PatientDeletionDetailView(APIView):
+    """Get details of a specific deletion request for the authenticated patient.
+
+    GET /api/surgeon/patient/deletion-request/<request_id>
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, request_id):
+        """Get details of a specific deletion request."""
+        try:
+            request_uuid = uuid.UUID(request_id)
+        except ValueError:
+            return Response(
+                {"detail": "Invalid request_id format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Find patient record for this user
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM doc_patients WHERE user_id = %s",
+                [request.user.id],
+            )
+            patient = cur.fetchone()
+
+            if not patient:
+                return Response(
+                    {"detail": "Patient record not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            patient_id = patient[0]
+
+        # Get the deletion request
+        try:
+            deletion_request = DpdpDeletionRequest.objects.get(
+                id=request_uuid,
+                patient_id=patient_id
+            )
+        except DpdpDeletionRequest.DoesNotExist:
+            return Response(
+                {"detail": "Deletion request not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = DpdpDeletionRequestSerializer(deletion_request)
+        return Response(serializer.data)
+
+
+class PatientDeletionAuditView(APIView):
+    """Get audit trail for a patient's deletion request.
+
+    GET /api/surgeon/patient/deletion-request/<request_id>/audit
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, request_id):
+        """Get audit trail for a deletion request."""
+        try:
+            request_uuid = uuid.UUID(request_id)
+        except ValueError:
+            return Response(
+                {"detail": "Invalid request_id format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Find patient record for this user
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM doc_patients WHERE user_id = %s",
+                [request.user.id],
+            )
+            patient = cur.fetchone()
+
+            if not patient:
+                return Response(
+                    {"detail": "Patient record not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            patient_id = patient[0]
+
+        # Verify the deletion request belongs to this patient
+        try:
+            deletion_request = DpdpDeletionRequest.objects.get(
+                id=request_uuid,
+                patient_id=patient_id
+            )
+        except DpdpDeletionRequest.DoesNotExist:
+            return Response(
+                {"detail": "Deletion request not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Get audit records for this deletion request
+        audit_records = DpdpDeletionAudit.objects.filter(
+            deletion_request_id=request_uuid
+        ).order_by("execution_time")
+
+        return Response([
+            {
+                "id": str(record.id),
+                "table_name": record.table_name,
+                "record_id": str(record.record_id) if record.record_id else None,
+                "record_type": record.record_type,
+                "deleted_fields": record.deleted_fields,
+                "record_summary": record.record_summary,
+                "execution_time": record.execution_time.isoformat() if record.execution_time else None,
+                "executed_by": record.executed_by,
+                "status": record.status,
+                "error_details": record.error_details,
+            }
+            for record in audit_records
+        ])
 

@@ -17,8 +17,10 @@ from rest_framework import serializers
 
 from .models import (
     DpdpDeletionRequest,
+    DpdpProcessingPurpose,
     DpdpRetentionRule,
     Doctor,
+    PatientConsentPreference,
 )
 
 
@@ -66,5 +68,30 @@ class DpdpDeletionRequestSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DpdpDeletionRequest
+        fields = "__all__"
+
+
+class DpdpProcessingPurposeSerializer(serializers.ModelSerializer):
+    """Serialize processing purpose definitions."""
+
+    created_at = SupabaseDateTimeField(allow_null=True, required=False)
+    updated_at = SupabaseDateTimeField(allow_null=True, required=False)
+
+    class Meta:
+        model = DpdpProcessingPurpose
+        fields = "__all__"
+
+
+class PatientConsentPreferenceSerializer(serializers.ModelSerializer):
+    """Serialize patient consent preferences."""
+
+    created_at = SupabaseDateTimeField(allow_null=True, required=False)
+    updated_at = SupabaseDateTimeField(allow_null=True, required=False)
+    granted_at = SupabaseDateTimeField(allow_null=True, required=False)
+    revoked_at = SupabaseDateTimeField(allow_null=True, required=False)
+    last_updated_at = SupabaseDateTimeField(allow_null=True, required=False)
+
+    class Meta:
+        model = PatientConsentPreference
         fields = "__all__"
 

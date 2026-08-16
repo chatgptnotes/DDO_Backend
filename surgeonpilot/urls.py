@@ -10,6 +10,13 @@ from .views import (
     DpdpDeletionRequestDetailView,
     DpdpDeletionRequestListView,
     DpdpRetentionRuleListView,
+    PatientConsentAuditView,
+    PatientConsentStatusView,
+    PatientDeletionAuditView,
+    PatientDeletionDetailView,
+    PatientDeletionHistoryView,
+    PatientDeletionRequestView,
+    ProcessingPurposeListView,
     TranscribeView,
 )
 
@@ -24,4 +31,13 @@ urlpatterns = [
     path("dpdp/deletion-requests/create/", CreateManualDeletionRequestView.as_view(), name="dpdp-deletion-request-create"),
     path("dpdp/deletion-requests/<uuid:request_id>/", DpdpDeletionRequestDetailView.as_view(), name="dpdp-deletion-request-detail"),
     path("dpdp/deletion-requests/<uuid:request_id>/cancel/", CancelDeletionRequestView.as_view(), name="dpdp-deletion-request-cancel"),
+    # Patient Consent Management
+    path("processing-purposes/", ProcessingPurposeListView.as_view(), name="processing-purposes"),
+    path("patient-consent/<uuid:patient_id>/", PatientConsentStatusView.as_view(), name="patient-consent-status"),
+    path("patient-consent/<uuid:patient_id>/audit/", PatientConsentAuditView.as_view(), name="patient-consent-audit"),
+    # Patient Data Deletion
+    path("patient/deletion-request/", PatientDeletionRequestView.as_view(), name="patient-deletion-request"),
+    path("patient/deletion-history/", PatientDeletionHistoryView.as_view(), name="patient-deletion-history"),
+    path("patient/deletion-request/<uuid:request_id>/", PatientDeletionDetailView.as_view(), name="patient-deletion-detail"),
+    path("patient/deletion-request/<uuid:request_id>/audit/", PatientDeletionAuditView.as_view(), name="patient-deletion-audit"),
 ]
