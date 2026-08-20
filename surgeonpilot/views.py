@@ -7,6 +7,8 @@ beyond the call site.
 """
 from __future__ import annotations
 
+import json
+import requests as http
 import uuid
 
 from django.db import IntegrityError, connection
@@ -70,7 +72,7 @@ class ClinicDoctorListView(ListAPIView):
         )
 
     def list(self, request, *args, **kwargs):
-        # Override to guarantee a plain array — DRF's default already does this
+        # Override to guarantee a plain array â€” DRF's default already does this
         # when pagination_class is None, but be explicit so the response shape
         # is locked down even if a developer adds pagination later.
         queryset = self.filter_queryset(self.get_queryset())
@@ -142,6 +144,50 @@ class TranscribeView(APIView):
 
 
 MURALI_SYNC_EMAIL = "cmd@hopehospital.com"
+
+class AbdmReachabilityProbeView(APIView):
+    """Temporary diagnostic: does THIS host's egress reach ABDM Sandbox?
+
+    Sends a credential-free POST to /v0.5/sessions and reports the raw
+    outcome:
+      - HTTP 400 JSON  => reached the ABDM API (credentials rejected as
+                          expected) -- this egress is NOT geo-blocked.
+      - HTTP 403 HTML  => blocked by ABDM's CloudFront WAF -- this egress
+                          IS geo-blocked and cannot host the ABDM proxy.
+
+    Public and credential-free on purpose; safe to remove after the
+    routing decision is made.
+    """
+
+    permission_classes = []
+
+    def get(self, request):
+        url = "https://dev.abdm.gov.in/gateway/v0.5/sessions"
+        try:
+            upstream = http.post(
+                url,
+                data=json.dumps({"clientId": "", "clientSecret": ""}),
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                timeout=20,
+            )
+        except Exception as exc:  # network-level failure
+            return Response(
+                {
+                    "reachable": False,
+                    "upstream_status": None,
+                    "content_type": None,
+                    "body_snippet": str(exc)[:200],
+                }
+            )
+        body = upstream.text or ""
+        return Response(
+            {
+                "reachable": upstream.status_code != 403 or "json" in (upstream.headers.get("Content-Type") or ""),
+                "upstream_status": upstream.status_code,
+                "content_type": upstream.headers.get("Content-Type"),
+                "body_snippet": body[:200],
+            }
+        )
 
 
 def _can_manage_adamrit_sync(request) -> bool:

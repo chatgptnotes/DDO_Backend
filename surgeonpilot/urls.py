@@ -2,6 +2,7 @@
 from django.urls import path
 
 from .views import (
+    AbdmReachabilityProbeView,
     AdamritSyncJobStatusView,
     AdamritSyncJobView,
     CancelDeletionRequestView,
@@ -21,6 +22,7 @@ from .views import (
 )
 
 urlpatterns = [
+    path("abdm-probe/", AbdmReachabilityProbeView.as_view(), name="abdm-probe"),
     path("clinic/doctors/", ClinicDoctorListView.as_view(), name="clinic-doctors-list"),
     path("transcribe/", TranscribeView.as_view(), name="transcribe"),
     path("adamrit-sync/", AdamritSyncJobView.as_view(), name="adamrit-sync-job"),

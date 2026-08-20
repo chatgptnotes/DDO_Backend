@@ -4,7 +4,7 @@ services:
     runtime: python
     region: singapore
     plan: starter
-    branch: chore/npm-scripts
+    branch: main
     buildCommand: pip install -r requirements.txt
     preDeployCommand: python manage.py apply_adamrit_sync_schema
     startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2
@@ -46,7 +46,7 @@ services:
     runtime: python
     region: singapore
     plan: starter
-    branch: chore/npm-scripts
+    branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: python manage.py process_adamrit_sync_jobs
     maxShutdownDelaySeconds: 300
