@@ -24,6 +24,10 @@ def _parse_postgres_url(url: str) -> dict:
         raise ValueError("DATABASE_URL must include a scheme like postgresql://")
     _scheme, rest = url.split("://", 1)
 
+    # URL decode the password first to handle %40 -> @
+    from urllib.parse import unquote
+    rest = unquote(rest)
+
     # rsplit on '@' once: everything left of the LAST '@' is auth, right is host[:port][/db][?params]
     if "@" not in rest:
         raise ValueError("DATABASE_URL is missing '@<host>' separator")
@@ -44,7 +48,7 @@ def _parse_postgres_url(url: str) -> dict:
         "HOST": host or "",
         "PORT": port or "5432",
         "CONN_MAX_AGE": 60,
-        "OPTIONS": {"sslmode": "require"},
+        "OPTIONS": {"sslmode": "prefer"},  # Try SSL but allow non-SSL for local dev
     }
 
 

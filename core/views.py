@@ -34,6 +34,8 @@ class MeView(APIView):
             {
                 "id": user.id,
                 "email": user.email,
+                "full_name": getattr(user, "full_name", ""),
+                "role": getattr(user, "role", None) or (roles[0] if roles else None),
                 "roles": roles,
                 "active_role": active,
             }

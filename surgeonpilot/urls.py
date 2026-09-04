@@ -20,10 +20,12 @@ from .views import (
     ProcessingPurposeListView,
     TranscribeView,
 )
+from .clinic_admin_views import ClinicAdminCreateView
 
 urlpatterns = [
     path("abdm-probe/", AbdmReachabilityProbeView.as_view(), name="abdm-probe"),
     path("clinic/doctors/", ClinicDoctorListView.as_view(), name="clinic-doctors-list"),
+    path("clinic-admins/", ClinicAdminCreateView.as_view(), name="clinic-admin-create"),
     path("transcribe/", TranscribeView.as_view(), name="transcribe"),
     path("adamrit-sync/", AdamritSyncJobView.as_view(), name="adamrit-sync-job"),
     path("adamrit-sync/<uuid:job_id>/", AdamritSyncJobStatusView.as_view(), name="adamrit-sync-job-status"),

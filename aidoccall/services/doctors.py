@@ -27,6 +27,7 @@ from typing import Any
 from django.db import connection, transaction
 
 from core.supabase_admin import find_or_create_user
+from surgeonpilot.availability import create_default_availability
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,17 @@ def create_doctor_profile(
         email=email,
         payload=payload,
     )
+    if profile_created:
+        # New doctors must be bookable immediately: patients can only pick
+        # dates for doctors with active doc_availability rows.
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM public.doc_doctors WHERE user_id = %s LIMIT 1",
+                [user_id],
+            )
+            row = cur.fetchone()
+        if row:
+            create_default_availability(str(row[0]))
 
     logger.info(
         "create_doctor_profile email=%s user_id=%s new_user=%s "

@@ -78,9 +78,31 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# ---- Custom User Model -------------------------------------------------------
+AUTH_USER_MODEL = "core.LocalUser"
+
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 8}},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
+
+# Local session login supports Django-hashed passwords in public.users and,
+# temporarily, legacy bcrypt hashes kept in the local auth.users table.  The
+# compatibility backend makes no network call to Supabase.
+AUTHENTICATION_BACKENDS = [
+    "core.backends.GotrueAuthBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
+
 # ---- DRF -------------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
+        # New browser sessions authenticate directly against PostgreSQL.
+        "rest_framework.authentication.SessionAuthentication",
+        # Keep existing bearer-token clients working while their individual
+        # features are migrated away from Supabase.
         "core.authentication.SupabaseJWTAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
@@ -140,6 +162,10 @@ SUPABASE_SERVICE_ROLE_KEY = config("SUPABASE_SERVICE_ROLE_KEY", default="")
 # ---- CORS ------------------------------------------------------------------
 CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="", cast=Csv())
 CORS_ALLOW_CREDENTIALS = True
+# Origins allowed to submit CSRF-protected requests with a Django session.
+# Production should use a same-site API host (for example api.aidoccall.com)
+# so session cookies remain first-party.
+CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="", cast=Csv())
 
 # ---- Stripe ----------------------------------------------------------------
 # Server-side secret — never expose to the frontend. Must be set in production

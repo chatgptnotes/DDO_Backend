@@ -6,9 +6,10 @@ from __future__ import annotations
 import logging
 
 from django.db import connection
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.generics import ListAPIView
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -83,6 +84,89 @@ class PatientSelectedDoctorsView(ListAPIView):
         rows = self.get_queryset()
         serializer = self.get_serializer(rows, many=True)
         return Response(serializer.data)
+
+
+class DoctorDirectoryView(APIView):
+    """`GET /api/aidoccall/doctors/` - patient-facing doctor directory.
+
+    Replaces patientService.searchDoctors' Supabase-direct read of
+    `doc_doctors`. Doctors live in the local PostgreSQL database.
+
+    Query params:
+      search        - case-insensitive substring on full_name
+      specialization - case-insensitive substring on specialization
+      verified=true - only is_verified doctors
+      booking_slug  - exact match, for booking-page lookups
+      id            - exact match, for id-based lookups
+
+    Public directory data only - credential/token columns are never exposed.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    # Public profile/booking fields. Deliberately excludes zoom_access_token,
+    # zoom_refresh_token, stripe_account_id, must_change_password, created_by.
+    FIELDS = (
+        "id",
+        "user_id",
+        "full_name",
+        "email",
+        "phone",
+        "specialization",
+        "qualification",
+        "experience_years",
+        "bio",
+        "profile_image",
+        "clinic_name",
+        "clinic_address",
+        "city",
+        "state",
+        "consultation_fee",
+        "online_fee",
+        "international_consultation_fee",
+        "international_online_fee",
+        "consultation_fee_inr",
+        "consultation_fee_usd",
+        "online_fee_inr",
+        "online_fee_usd",
+        "followup_window_days",
+        "followup_discount_pct",
+        "consultation_type",
+        "booking_slug",
+        "is_verified",
+        "is_active",
+        "created_at",
+    )
+
+    def get(self, request):
+        queryset = (
+            Doctor.objects.filter(role="doctor")
+            .exclude(is_active=False)
+            .exclude(Q(specialization__isnull=True) | Q(specialization=""))
+        )
+
+        search = (request.query_params.get("search") or "").strip()
+        if search:
+            queryset = queryset.filter(full_name__icontains=search)
+
+        specialization = (request.query_params.get("specialization") or "").strip()
+        if specialization:
+            queryset = queryset.filter(specialization__icontains=specialization)
+
+        if request.query_params.get("verified") == "true":
+            queryset = queryset.filter(is_verified=True)
+
+        booking_slug = (request.query_params.get("booking_slug") or "").strip()
+        if booking_slug:
+            queryset = queryset.filter(booking_slug=booking_slug)
+
+        doctor_id = (request.query_params.get("id") or "").strip()
+        if doctor_id:
+            queryset = queryset.filter(id=doctor_id)
+
+        rows = queryset.order_by("full_name").values(*self.FIELDS)
+        return Response(list(rows))
 
 
 class CreateDoctorView(APIView):
