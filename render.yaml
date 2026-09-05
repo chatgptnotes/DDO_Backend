@@ -15,7 +15,7 @@ services:
       - key: DJANGO_SETTINGS_MODULE
         value: config.settings.prod
       - key: DJANGO_ALLOWED_HOSTS
-        value: ddo-backend-api.onrender.com
+        value: ddo-backend-api.onrender.com,api.aidoccall.com
       - key: CSRF_TRUSTED_ORIGINS
         value: https://www.aidoccall.com,https://aidoccall.com,https://www.ddo.center
       - key: DJANGO_SECRET_KEY
