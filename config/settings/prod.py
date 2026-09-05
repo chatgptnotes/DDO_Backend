@@ -1,5 +1,5 @@
 """Production settings — used in staging and prod deployments."""
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from decouple import config
 
@@ -12,9 +12,12 @@ _u = urlparse(_db_url)
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": (_u.path or "/").lstrip("/") or "postgres",
-        "USER": _u.username or "",
-        "PASSWORD": _u.password or "",
+        "NAME": unquote((_u.path or "/").lstrip("/")) or "postgres",
+        "USER": unquote(_u.username or ""),
+        # urlparse does not decode percent-escapes; passwords pasted into env
+        # vars are commonly percent-encoded (e.g. @ as %40). dev.py already
+        # unquotes for the same reason.
+        "PASSWORD": unquote(_u.password or ""),
         "HOST": _u.hostname or "",
         "PORT": str(_u.port or 5432),
         "CONN_MAX_AGE": 60,
@@ -33,3 +36,9 @@ SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 X_FRAME_OPTIONS = "DENY"
+
+# The patient portal frontend (www.aidoccall.com) is hosted on a different
+# site than this API, so the session/CSRF cookies must be explicitly
+# cross-site. Requires Secure (set above) or browsers reject SameSite=None.
+SESSION_COOKIE_SAMESITE = "None"
+CSRF_COOKIE_SAMESITE = "None"
