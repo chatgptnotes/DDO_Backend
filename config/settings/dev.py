@@ -55,4 +55,20 @@ def _parse_postgres_url(url: str) -> dict:
 DEBUG = True
 ALLOWED_HOSTS = ["*"]
 
+# The Vite dev server auto-bumps its port when the configured one is busy
+# (3002 -> 3003 -> 3004 ...), which silently invalidates a fixed origin
+# allow-list: the browser blocks every request as a CORS failure and the
+# frontend surfaces it as "Failed to fetch". Trust any localhost port in dev.
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^http://localhost:\d+$",
+    r"^http://127\.0\.0\.1:\d+$",
+]
+# Django's CSRF list does not support wildcards, so cover the dev ports explicitly.
+CSRF_TRUSTED_ORIGINS = [
+    *CSRF_TRUSTED_ORIGINS,
+    *(f"http://{host}:{port}"
+      for port in range(3000, 3011)
+      for host in ("localhost", "127.0.0.1")),
+]
+
 DATABASES = {"default": _parse_postgres_url(config("DATABASE_URL"))}
