@@ -220,6 +220,7 @@ class AppointmentListCreateView(APIView):
                 SELECT a.id, a.appointment_date, a.start_time, a.end_time, a.visit_type,
                        a.status, a.amount, a.payment_status, a.reason_for_visit,
                        a.patient_name, a.patient_email, a.patient_phone,
+                       COALESCE(a.meeting_link, d.standard_meeting_link) AS meeting_link,
                        d.id AS doctor_id, d.full_name AS doctor_full_name,
                        d.specialization AS doctor_specialization,
                        d.clinic_name AS doctor_clinic_name,
@@ -250,6 +251,10 @@ class AppointmentListCreateView(APIView):
                     "patient_name": row["patient_name"],
                     "patient_email": row["patient_email"],
                     "patient_phone": row["patient_phone"],
+                    # Per-appointment link, falling back to the doctor's
+                    # standard meeting link so the patient Join button works
+                    # for appointments booked before Zoom automation ran.
+                    "meeting_link": row["meeting_link"],
                     "doctor": {
                         "id": row["doctor_id"],
                         "full_name": row["doctor_full_name"],
