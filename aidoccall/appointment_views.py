@@ -217,7 +217,7 @@ class AppointmentListCreateView(APIView):
         with connection.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT a.id, a.appointment_date, a.start_time, a.end_time, a.visit_type,
+                SELECT a.id, a.patient_id, a.appointment_date, a.start_time, a.end_time, a.visit_type,
                        a.status, a.amount, a.payment_status, a.reason_for_visit,
                        a.patient_name, a.patient_email, a.patient_phone,
                        COALESCE(a.meeting_link, d.standard_meeting_link) AS meeting_link,
@@ -240,6 +240,10 @@ class AppointmentListCreateView(APIView):
             appointments.append(
                 {
                     "id": row["id"],
+                    "patient_id": row["patient_id"],
+                    # Flat ids the portal reads directly (reschedule modal,
+                    # doctor documents) alongside the nested `doctor` object.
+                    "doctor_id": row["doctor_id"],
                     "appointment_date": row["appointment_date"],
                     "start_time": row["start_time"],
                     "end_time": row["end_time"],
@@ -326,8 +330,8 @@ class AppointmentListCreateView(APIView):
                     %s, %s, %s, %s, 'pending',
                     %s, 'pending', %s, %s
                 )
-                RETURNING id, appointment_date, start_time, end_time, visit_type,
-                          status, amount, payment_status, reason_for_visit
+                RETURNING id, patient_id, doctor_id, appointment_date, start_time,
+                          end_time, visit_type, status, amount, payment_status, reason_for_visit
                 """,
                 [
                     patient_id,

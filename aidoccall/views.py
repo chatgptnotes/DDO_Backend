@@ -169,6 +169,97 @@ class DoctorDirectoryView(APIView):
         return Response(list(rows))
 
 
+class DoctorSharedDocumentsView(APIView):
+    """`GET /api/aidoccall/documents/from-doctors/` - documents the patient's
+    doctors shared with them (prescriptions, consultation notes, uploaded
+    reports).
+
+    Replaces patientService.getDocuments' Supabase-direct read of
+    `doc_patient_reports` filtered to uploaded_by = 'doctor'. Doctors write
+    these rows from AiSurgeonPilot into local PostgreSQL, so the list is
+    served from the same database as the appointments endpoints. The patient
+    is resolved from the session - never from the request.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        patient_id = _resolve_patient_id_for_user(request.user.id)
+        if not patient_id:
+            return Response({"documents": []})
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id, r.doctor_id, r.appointment_id, r.file_name, r.file_url,
+                       r.file_type, r.description, r.created_at,
+                       d.full_name AS doctor_full_name
+                  FROM doc_patient_reports r
+                  LEFT JOIN doc_doctors d ON d.id = r.doctor_id
+                 WHERE r.patient_id = %s
+                   AND r.uploaded_by = 'doctor'
+                 ORDER BY r.created_at DESC
+                """,
+                [patient_id],
+            )
+            columns = [c[0] for c in cur.description]
+            documents = [dict(zip(columns, row)) for row in cur.fetchall()]
+
+        return Response({"documents": documents})
+
+
+class PatientNotificationsView(APIView):
+    """`GET /api/aidoccall/patient-notifications/` - the session patient's
+    in-app notifications (doctor reschedules, confirmations, cancellations,
+    shared documents), newest first. `POST` marks them all read.
+
+    Replaces PatientNotificationBell's Supabase-direct read of
+    `doc_notifications`, which could never see the rows the local doctor
+    flows write.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        patient_id = _resolve_patient_id_for_user(request.user.id)
+        if not patient_id:
+            return Response({"notifications": []})
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT n.id, n.title, n.message, n.is_read,
+                       COALESCE(n.sent_at, n.created_at) AS created_at,
+                       d.full_name AS doctor_name
+                  FROM doc_notifications n
+                  LEFT JOIN doc_doctors d ON d.id = n.doctor_id
+                 WHERE n.patient_id = %s AND n.type = 'in_app'
+                 ORDER BY COALESCE(n.sent_at, n.created_at) DESC
+                 LIMIT 30
+                """,
+                [patient_id],
+            )
+            columns = [c[0] for c in cur.description]
+            notifications = [dict(zip(columns, row)) for row in cur.fetchall()]
+
+        return Response({"notifications": notifications})
+
+    def post(self, request):
+        patient_id = _resolve_patient_id_for_user(request.user.id)
+        if not patient_id:
+            return Response(
+                {"success": False, "message": "Patient profile not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE doc_notifications SET is_read = true "
+                "WHERE patient_id = %s AND type = 'in_app' AND is_read = false",
+                [patient_id],
+            )
+        return Response({"success": True})
+
+
 class CreateDoctorView(APIView):
     """`POST /api/aidoccall/admin/doctors/` — clinical_admin onboards a doctor.
 

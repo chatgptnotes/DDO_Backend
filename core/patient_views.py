@@ -1,6 +1,12 @@
 """
 Patient registration endpoints backed by local PostgreSQL.
 """
+import re
+import time
+import uuid
+from pathlib import Path
+
+from django.conf import settings
 from django.db import connection, transaction
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -228,11 +234,25 @@ class PatientSubResourceCreateView(APIView):
 
     Subclasses provide the table and a column->value map built from the body.
     The patient is always resolved from the Django session - never from the
-    request body.
+    request body. GET lists every row the session patient owns, newest first -
+    the portal pages migrated off Supabase-direct reads use it.
     """
 
     permission_classes = [IsAuthenticated]
     table = ""
+
+    def get(self, request):
+        patient_id = _patient_id_for(request)
+        if patient_id is None:
+            return Response([])
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT * FROM public.{self.table} WHERE patient_id = %s ORDER BY created_at DESC",
+                [patient_id],
+            )
+            columns = [c[0] for c in cursor.description]
+            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        return Response(rows)
 
     def post(self, request):
         patient_id = _patient_id_for(request)
@@ -357,3 +377,155 @@ class PatientInsuranceCreateView(PatientSubResourceCreateView):
             "is_primary": body.get("isPrimary") or False,
             "is_active": True,
         }
+
+
+class PatientMedicationCreateView(PatientSubResourceCreateView):
+    """GET/POST /api/patients/me/medications/ - doc_patient_medications."""
+
+    table = "doc_patient_medications"
+
+    def columns_for(self, body):
+        return {
+            "medication_name": body.get("medicationName"),
+            "dosage": body.get("dosage"),
+            "frequency": body.get("frequency"),
+            "prescribing_doctor": body.get("prescribedBy"),
+            "start_date": body.get("startDate"),
+            "end_date": body.get("endDate"),
+            "is_current": body.get("isCurrent") is not False,
+            "notes": body.get("notes"),
+        }
+
+
+class PatientReportCreateView(PatientSubResourceCreateView):
+    """POST /api/patients/me/reports/ - doc_patient_reports.
+
+    The file bytes go straight to the storage bucket from the browser; this
+    endpoint only records the row (uploaded_by='patient') so doctor-side local
+    reads see the upload.
+    """
+
+    table = "doc_patient_reports"
+
+    def columns_for(self, body):
+        return {
+            "doc_patient_id": _patient_id_for(self.request),
+            "file_name": body.get("fileName"),
+            "file_url": body.get("fileUrl"),
+            "file_type": body.get("fileType") or "medical_report",
+            "description": body.get("description"),
+            "uploaded_by": "patient",
+        }
+
+
+class PatientReportUploadView(APIView):
+    """POST /api/patients/me/reports/upload/ - multipart report file upload.
+
+    Stores the bytes on the local server under media/patient-reports/<pid>/
+    and records the doc_patient_reports row (uploaded_by='patient'). Replaces
+    the remote-bucket upload whose storage policies local-uuid patients could
+    not pass. The doctor dashboard streams the file back through
+    /api/doctor/patients/<id>/reports/file/.
+    """
+
+    permission_classes = [IsAuthenticated]
+    max_bytes = 5 * 1024 * 1024
+
+    def post(self, request):
+        patient_id = _patient_id_for(request)
+        if patient_id is None:
+            return Response(
+                {"success": False, "message": "Patient profile not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        uploaded = request.FILES.get("file")
+        if uploaded is None:
+            return Response(
+                {"success": False, "message": "A report file is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if uploaded.size > self.max_bytes:
+            return Response(
+                {"success": False, "message": "File is too large. Maximum size is 5MB."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", uploaded.name or "report")
+        rel_path = f"patient-reports/{patient_id}/{int(time.time() * 1000)}_{safe_name}"
+        abs_path = Path(settings.BASE_DIR) / "media" / rel_path
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(abs_path, "wb") as destination:
+            for chunk in uploaded.chunks():
+                destination.write(chunk)
+
+        columns = {
+            "patient_id": patient_id,
+            "doc_patient_id": patient_id,
+            "file_name": uploaded.name or safe_name,
+            "file_url": rel_path,
+            "file_type": request.data.get("fileType") or "medical_report",
+            "description": request.data.get("description") or None,
+            "uploaded_by": "patient",
+        }
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                INSERT INTO public.doc_patient_reports ({', '.join(columns)})
+                VALUES ({', '.join(['%s'] * len(columns))})
+                RETURNING *
+                """,
+                list(columns.values()),
+            )
+            row = _row_to_dict(cursor)
+
+        return Response(row, status=status.HTTP_201_CREATED)
+
+
+class PatientSubResourceDeleteView(APIView):
+    """DELETE one owned sub-resource row (uuid item id, session patient)."""
+
+    permission_classes = [IsAuthenticated]
+    table = ""
+
+    def delete(self, request, item_id):
+        patient_id = _patient_id_for(request)
+        if patient_id is None:
+            return Response(
+                {"success": False, "message": "Patient profile not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        try:
+            item_uuid = uuid.UUID(str(item_id))
+        except ValueError:
+            return Response(
+                {"success": False, "message": "Invalid id"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"DELETE FROM public.{self.table} WHERE id = %s AND patient_id = %s",
+                [str(item_uuid), patient_id],
+            )
+            deleted = cursor.rowcount
+        if not deleted:
+            return Response({"success": False, "message": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"success": True})
+
+
+class PatientMedicalConditionDeleteView(PatientSubResourceDeleteView):
+    """DELETE /api/patients/me/medical-conditions/<id>/."""
+
+    table = "doc_patient_medical_history"
+
+
+class PatientAllergyDeleteView(PatientSubResourceDeleteView):
+    """DELETE /api/patients/me/allergies/<id>/."""
+
+    table = "doc_patient_allergies"
+
+
+class PatientMedicationDeleteView(PatientSubResourceDeleteView):
+    """DELETE /api/patients/me/medications/<id>/."""
+
+    table = "doc_patient_medications"
