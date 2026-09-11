@@ -28,14 +28,14 @@ django.setup()
 from django.test import Client
 from django.utils import timezone
 from rest_framework.test import APIClient
-# from supabase import create_client  # Not needed for this test
+
 
 # Import models
 from surgeonpilot.models import DpdpDeletionRequest, DpdpDeletionAudit
-from core.auth import SupabaseJWTAuthentication
+from core.authentication import LocalTokenAuthentication
 
 # Test configuration
-SUPABASE_URL = os.getenv('NEXT_PUBLIC_SUPABASE_URL', 'https://uakqdjxuceckjssjdyui.supabase.co')
+SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY', '')
 BACKEND_URL = 'http://localhost:8000'
 
@@ -157,5 +157,5 @@ print("\n" + "=" * 70)
 print("TEST SUMMARY")
 print("=" * 70)
 print("Basic infrastructure tests completed.")
-print("For full integration testing, a valid Supabase JWT token is required.")
+print("For full integration testing, a valid signed session token is required.")
 print("=" * 70)

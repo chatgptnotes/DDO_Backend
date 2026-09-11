@@ -1,10 +1,13 @@
 """Pytest fixtures for the backend test suite."""
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
 import time
 
-import jwt
 import pytest
 
 
@@ -12,19 +15,18 @@ import pytest
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.test")
 
 
-@pytest.fixture
-def jwt_secret(settings):
-    return settings.SUPABASE_JWT_SECRET
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 @pytest.fixture
-def jwt_audience(settings):
-    return settings.SUPABASE_JWT_AUDIENCE
+def session_secret(settings):
+    return settings.AUTH_SESSION_SECRET
 
 
 @pytest.fixture
-def make_token(jwt_secret, jwt_audience, settings):
-    """Factory: produce a Supabase-shaped JWT for tests.
+def make_token(session_secret):
+    """Factory: produce a signed LOCAL session token for tests.
 
     Usage:
         token = make_token(sub="user-1", email="x@y.com")
@@ -36,27 +38,27 @@ def make_token(jwt_secret, jwt_audience, settings):
         sub: str = "user-1",
         email: str = "test@example.com",
         exp_offset: int = 3600,
-        audience: str | None = None,
+        role: str = "authenticated",
         secret: str | None = None,
-        algorithm: str | None = None,
         extra_claims: dict | None = None,
     ) -> str:
         now = int(time.time())
         payload = {
-            "sub": sub,
             "email": email,
-            "aud": audience if audience is not None else jwt_audience,
-            "iat": now,
+            "role": role,
             "exp": now + exp_offset,
-            "role": "authenticated",
         }
+        if sub:
+            payload["sub"] = sub
         if extra_claims:
             payload.update(extra_claims)
-        return jwt.encode(
-            payload,
-            secret or jwt_secret,
-            algorithm=algorithm or settings.SUPABASE_JWT_ALGORITHM,
-        )
+        data = _b64url_encode(json.dumps(payload).encode("utf-8"))
+        signature = hmac.new(
+            (secret or session_secret).encode("utf-8"),
+            data.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        return f"{data}.{_b64url_encode(signature)}"
 
     return _make
 

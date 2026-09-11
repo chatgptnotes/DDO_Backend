@@ -1,9 +1,9 @@
-"""Test settings — never hits a real database or real Supabase secret."""
+"""Test settings — never hits a real database or a real signing secret."""
 import os
 
 # Hardcoded, deterministic test secret. Never used outside the test suite.
 os.environ.setdefault("DJANGO_SECRET_KEY", "test-secret-key-not-for-prod")
-os.environ.setdefault("SUPABASE_JWT_SECRET", "test-jwt-secret-please-change")
+os.environ.setdefault("AUTH_SESSION_SECRET", "test-session-secret-not-for-prod")
 os.environ.setdefault("DJANGO_ALLOWED_HOSTS", "*")
 os.environ.setdefault("CORS_ALLOWED_ORIGINS", "")
 
@@ -21,7 +21,7 @@ DATABASES = {
 # Disable DRF default pagination / throttling in tests for predictability.
 REST_FRAMEWORK = {  # noqa: F405
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "core.authentication.SupabaseJWTAuthentication",
+        "core.authentication.LocalTokenAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",

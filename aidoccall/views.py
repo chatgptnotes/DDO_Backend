@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.permissions import HasRole
-from core.supabase_admin import SupabaseAdminError
+from core.local_admin import LocalProvisioningError
 from surgeonpilot.models import Doctor
 
 from .models import PatientDoctorSelection
@@ -84,6 +84,52 @@ class PatientSelectedDoctorsView(ListAPIView):
         rows = self.get_queryset()
         serializer = self.get_serializer(rows, many=True)
         return Response(serializer.data)
+
+
+class PatientSelectDoctorView(APIView):
+    """`POST /api/aidoccall/patient/selected-doctors/` - select a doctor.
+
+    Body: { doctor_id, is_favorite? }. Upserts the caller's
+    doc_patient_doctor_selections row (idempotent per patient+doctor).
+    Replaces patientService.selectDoctor's Supabase-direct upsert.
+    """
+
+    permission_classes = [
+        IsAuthenticated,
+        HasRole("patient", "superadmin", "clinical_admin"),
+    ]
+
+    def post(self, request):
+        patient_id = _resolve_patient_id_for_user(request.user.id)
+        if not patient_id:
+            return Response(
+                {"detail": "Patient profile not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        doctor_id = str(request.data.get("doctor_id") or "").strip()
+        is_favorite = bool(request.data.get("is_favorite", False))
+        if not doctor_id:
+            return Response(
+                {"detail": "doctor_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO doc_patient_doctor_selections
+                    (patient_id, doctor_id, is_favorite, status, selected_at)
+                VALUES (%s::uuid, %s::uuid, %s, 'active', now())
+                ON CONFLICT (patient_id, doctor_id)
+                DO UPDATE SET is_favorite = EXCLUDED.is_favorite
+                RETURNING row_to_json(doc_patient_doctor_selections)
+                """,
+                [patient_id, doctor_id, is_favorite],
+            )
+            row = cur.fetchone()
+
+        return Response(row[0] if row else {}, status=status.HTTP_201_CREATED)
 
 
 class DoctorDirectoryView(APIView):
@@ -263,12 +309,12 @@ class PatientNotificationsView(APIView):
 class CreateDoctorView(APIView):
     """`POST /api/aidoccall/admin/doctors/` — clinical_admin onboards a doctor.
 
-    Replaces the legacy frontend path that called Supabase Auth directly and
+    Replaces the legacy frontend path that called the external identity service directly and
     returned "email already exists" when the email belonged to any existing
     user (including the calling admin themselves).
 
     The handler is idempotent: existing users get the doctor role attached;
-    new emails get an invite link via Supabase Auth Admin. Either way, a
+    new emails get a locally provisioned auth row. Either way, a
     `doc_doctors` row is created or updated for the same `user_id`.
     """
 
@@ -289,8 +335,8 @@ class CreateDoctorView(APIView):
                 payload=payload,
                 scope_id=str(scope_id) if scope_id else None,
             )
-        except SupabaseAdminError as exc:
-            logger.error("Supabase admin call failed: %s", exc)
+        except LocalProvisioningError as exc:
+            logger.error("Local auth provisioning failed: %s", exc)
             return Response(
                 {"detail": "Could not provision auth user", "error": str(exc)},
                 status=status.HTTP_502_BAD_GATEWAY,

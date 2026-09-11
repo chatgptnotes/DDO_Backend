@@ -26,8 +26,15 @@ from core.patient_views import (
     PatientRegisterView,
     PatientReportCreateView,
     PatientReportUploadView,
+    PatientReportFileView,
 )
-from core.auth_views import CsrfView, LoginView, LogoutView
+from core.auth_views import (
+    CsrfView,
+    LoginView,
+    LogoutView,
+    PatientOtpRequestView,
+    PatientOtpVerifyView,
+)
 
 urlpatterns = [
     path("api/health/", HealthView.as_view(), name="health"),
@@ -44,10 +51,13 @@ urlpatterns = [
     path("api/patients/me/medications/<uuid:item_id>/", PatientMedicationDeleteView.as_view(), name="patient_medication_delete"),
     path("api/patients/me/reports/", PatientReportCreateView.as_view(), name="patient_reports"),
     path("api/patients/me/reports/upload/", PatientReportUploadView.as_view(), name="patient_report_upload"),
+    path("api/patients/me/reports/file/", PatientReportFileView.as_view(), name="patient_report_file"),
     path("api/patients/me/insurance/", PatientInsuranceCreateView.as_view(), name="patient_insurance"),
     path("api/auth/csrf/", CsrfView.as_view(), name="csrf"),
     path("api/auth/login/", LoginView.as_view(), name="login"),
     path("api/auth/logout/", LogoutView.as_view(), name="logout"),
+    path("api/auth/otp/request/", PatientOtpRequestView.as_view(), name="patient_otp_request"),
+    path("api/auth/otp/verify/", PatientOtpVerifyView.as_view(), name="patient_otp_verify"),
     path("api/surgeon/", include("surgeonpilot.urls")),
     path("api/aidoccall/", include("aidoccall.urls")),
     path("api/payments/", include("payments.urls")),

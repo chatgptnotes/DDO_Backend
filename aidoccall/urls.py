@@ -16,6 +16,7 @@ from .views import (
     DoctorSharedDocumentsView,
     PatientNotificationsView,
     PatientSelectedDoctorsView,
+    PatientSelectDoctorView,
 )
 
 urlpatterns = [
@@ -58,6 +59,11 @@ urlpatterns = [
         "appointments/<uuid:appointment_id>/reschedule-request/",
         AppointmentRescheduleRequestView.as_view(),
         name="appointment-reschedule-request",
+    ),
+    path(
+        "patient/selected-doctors/select/",
+        PatientSelectDoctorView.as_view(),
+        name="patient-select-doctor",
     ),
     path(
         "documents/from-doctors/",

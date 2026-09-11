@@ -103,7 +103,7 @@ REST_FRAMEWORK = {
         "rest_framework.authentication.SessionAuthentication",
         # Keep existing bearer-token clients working while their individual
         # features are migrated away from Supabase.
-        "core.authentication.SupabaseJWTAuthentication",
+        "core.authentication.LocalTokenAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
@@ -130,34 +130,11 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = config(
 # backend (requires ffmpeg on the host). 'whisper'/'gemini' reserved for later.
 TRANSCRIPTION_ENGINE = config("TRANSCRIPTION_ENGINE", default="google")
 
-# ---- Supabase JWT ----------------------------------------------------------
-# Legacy symmetric secret (HS256). Still used for HS256-signed tokens and the
-# test suite. Newer Supabase projects sign access tokens asymmetrically
-# (ES256/RS256) with rotating keys — those are verified against the project's
-# public JWKS instead (see SUPABASE_JWKS_URL below).
-SUPABASE_JWT_SECRET = config("SUPABASE_JWT_SECRET")
-SUPABASE_JWT_AUDIENCE = config("SUPABASE_JWT_AUDIENCE", default="authenticated")
-SUPABASE_JWT_ALGORITHM = config("SUPABASE_JWT_ALGORITHM", default="HS256")
-
-# Public JWKS endpoint for asymmetric (ES256/RS256) access tokens. Defaults to
-# the project's well-known URL derived from SUPABASE_URL; override only if needed.
-_SUPABASE_URL_FOR_JWKS = config("SUPABASE_URL", default="").rstrip("/")
-SUPABASE_JWKS_URL = config(
-    "SUPABASE_JWKS_URL",
-    default=(
-        f"{_SUPABASE_URL_FOR_JWKS}/auth/v1/.well-known/jwks.json"
-        if _SUPABASE_URL_FOR_JWKS
-        else ""
-    ),
-)
-
-# Supabase project URL + service-role key — used for privileged operations
-# (auth.admin.createUser, sending invite emails). Service role bypasses RLS,
-# so it must NEVER reach the browser. Empty defaults so dev environments
-# without these set still boot; views that need them raise a clear error.
-SUPABASE_URL = config("SUPABASE_URL", default="")
-SUPABASE_ANON_KEY = config("SUPABASE_ANON_KEY", default="")
-SUPABASE_SERVICE_ROLE_KEY = config("SUPABASE_SERVICE_ROLE_KEY", default="")
+# ---- Local session tokens --------------------------------------------------
+# Shared HMAC secret for the signed session tokens issued by the login
+# endpoints (Next.js `ddo_session` cookie / Bearer tokens and this backend's
+# own session login). Verified by core.authentication.LocalTokenAuthentication.
+AUTH_SESSION_SECRET = config("AUTH_SESSION_SECRET", default="")
 
 # ---- CORS ------------------------------------------------------------------
 CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="", cast=Csv())

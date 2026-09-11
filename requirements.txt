@@ -1,9 +1,6 @@
 Django>=5.0,<5.2
 djangorestframework>=3.15,<3.16
 django-cors-headers>=4.3
-pyjwt>=2.8
-# ES256/RS256 verification of Supabase asymmetric JWTs (new signing keys).
-cryptography>=42
 psycopg[binary]>=3.1
 python-decouple>=3.8
 # bcrypt hashes for auth.users.encrypted_password (GoTrue-compatible local signups).

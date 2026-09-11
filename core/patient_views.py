@@ -15,6 +15,23 @@ from rest_framework.views import APIView
 
 from .models import DocPatient, UserRole
 from .serializers import PatientRegistrationSerializer
+from core.otp_service import normalize_phone, verify_challenge
+
+OTP_VERIFY_HTTP = {
+    "not_found": 404,
+    "invalid": 400,
+    "expired": 400,
+    "used": 400,
+    "locked": 429,
+}
+
+OTP_VERIFY_MESSAGES = {
+    "not_found": "Verification request not found or expired. Please request a new code.",
+    "invalid": "Incorrect code. Please try again.",
+    "expired": "This code has expired. Please request a new one.",
+    "used": "This code was already used. Please request a new one.",
+    "locked": "Too many incorrect attempts. Please request a new code.",
+}
 
 
 def _patient_id_for(request) -> str | None:
@@ -32,6 +49,18 @@ def _row_to_dict(cursor) -> dict | None:
     columns = [c[0] for c in cursor.description]
     row = cursor.fetchone()
     return dict(zip(columns, row)) if row else None
+
+
+def _dump_error(label: str, tb_text: str) -> None:
+    """TEMP DEBUG — write the full traceback of a failed patient-records
+    request to a log file so it can be inspected after the fact."""
+    try:
+        from pathlib import Path
+        log_path = Path(settings.BASE_DIR) / "patient_records_error.log"
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write("\n=== " + str(label) + " ===\n" + str(tb_text) + "\n")
+    except Exception:
+        pass
 
 
 def _link_patient_profile(user, data) -> bool:
@@ -113,6 +142,7 @@ class CurrentPatientProfileView(APIView):
             "first_name", "last_name", "phone_number", "date_of_birth", "gender",
             "blood_group", "height_cm", "weight_kg",
             "registration_step", "registration_completed", "intake_form_completed",
+            "international_consent_completed",
         }
         body = request.data or {}
         assignments = []
@@ -169,9 +199,43 @@ class PatientRegisterView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        """Register a new patient."""
+        """Register a new patient (requires a verified SMS OTP challenge)."""
         body = request.data or {}
         session_user = request.user if getattr(request.user, "is_authenticated", False) else None
+
+        # OTP gate: registration completes only after the patient verifies the
+        # code sent to their mobile. The challenge binds BOTH the phone and
+        # the email — the client cannot swap either between request/verify.
+        otp_request_id = str(body.get("otp_request_id") or "").strip()
+        otp_code = str(body.get("otp_code") or "").strip()
+        if not otp_request_id or not otp_code:
+            return Response({
+                'success': False,
+                'message': 'Mobile verification required. Request an OTP, then '
+                           'submit it together with your registration details.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        otp_status, challenge = verify_challenge(otp_request_id, "register", otp_code)
+        if otp_status != "ok" or challenge is None:
+            return Response({
+                'success': False,
+                'message': OTP_VERIFY_MESSAGES.get(
+                    otp_status, 'Mobile verification failed. Please request a new code.'),
+            }, status=OTP_VERIFY_HTTP.get(otp_status, status.HTTP_400_BAD_REQUEST))
+
+        # Destination + identity binding (defense in depth).
+        body_phone = normalize_phone(str(body.get("phone") or "")) or ""
+        if body_phone != challenge["phone"]:
+            return Response({
+                'success': False,
+                'message': 'This code was issued to a different mobile number.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        body_email = str(body.get("email") or "").strip().lower()
+        if (challenge.get("email") or "").lower() != body_email:
+            return Response({
+                'success': False,
+                'message': 'This code was issued for a different email address.',
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # Signed-in patient whose profile is missing: create + link it. Without
         # this branch the portal's "no profile -> /patient/register" redirect
@@ -245,13 +309,18 @@ class PatientSubResourceCreateView(APIView):
         patient_id = _patient_id_for(request)
         if patient_id is None:
             return Response([])
-        with connection.cursor() as cursor:
-            cursor.execute(
-                f"SELECT * FROM public.{self.table} WHERE patient_id = %s ORDER BY created_at DESC",
-                [patient_id],
-            )
-            columns = [c[0] for c in cursor.description]
-            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT * FROM public.{self.table} WHERE patient_id = %s ORDER BY created_at DESC",
+                    [patient_id],
+                )
+                columns = [c[0] for c in cursor.description]
+                rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except Exception:
+            import traceback as _tb
+            _dump_error("GET " + self.table, _tb.format_exc())
+            raise
         return Response(rows)
 
     def post(self, request):
@@ -263,16 +332,21 @@ class PatientSubResourceCreateView(APIView):
             )
 
         columns: dict = {"patient_id": patient_id, **self.columns_for(request.data or {})}
-        with connection.cursor() as cursor:
-            cursor.execute(
-                f"""
-                INSERT INTO public.{self.table} ({', '.join(columns)})
-                VALUES ({', '.join(['%s'] * len(columns))})
-                RETURNING *
-                """,
-                list(columns.values()),
-            )
-            row = _row_to_dict(cursor)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    INSERT INTO public.{self.table} ({', '.join(columns)})
+                    VALUES ({', '.join(['%s'] * len(columns))})
+                    RETURNING *
+                    """,
+                    list(columns.values()),
+                )
+                row = _row_to_dict(cursor)
+        except Exception:
+            import traceback as _tb
+            _dump_error("POST " + self.table, _tb.format_exc())
+            raise
 
         return Response(row, status=status.HTTP_201_CREATED)
 
@@ -333,7 +407,8 @@ class PatientMedicalConditionCreateView(PatientSubResourceCreateView):
         return {
             "condition_name": body.get("conditionName"),
             "condition_type": body.get("conditionType") or "chronic",
-            "diagnosed_date": body.get("diagnosedDate"),
+            # `or None`: an empty string from the form would crash the date insert
+            "diagnosed_date": body.get("diagnosedDate") or None,
             "notes": body.get("notes"),
             "is_current": body.get("isCurrent") is not False,
         }
@@ -468,6 +543,13 @@ class PatientReportUploadView(APIView):
             "description": request.data.get("description") or None,
             "uploaded_by": "patient",
         }
+        # Optional bindings from the portal upload flow (booking context)
+        doctor_id = request.data.get("doctorId")
+        if doctor_id:
+            columns["doctor_id"] = doctor_id
+        appointment_id = request.data.get("appointmentId")
+        if appointment_id:
+            columns["appointment_id"] = appointment_id
         with connection.cursor() as cursor:
             cursor.execute(
                 f"""
@@ -529,3 +611,64 @@ class PatientMedicationDeleteView(PatientSubResourceDeleteView):
     """DELETE /api/patients/me/medications/<id>/."""
 
     table = "doc_patient_medications"
+
+
+class PatientReportFileView(APIView):
+    """GET /api/patients/me/reports/file/?path=<relative media path>
+
+    Streams one of the session patient's own uploaded/shared documents from
+    the local media store (media/patient-reports/<pid>/...). The path must
+    start with the patient's own folder — no traversal, no other patient's
+    files. Replaces the retired remote-bucket signed/public URLs.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    content_types = {
+        ".pdf": "application/pdf",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".html": "text/html",
+        ".doc": "application/msword",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+
+    def get(self, request):
+        from django.http import FileResponse
+        import re as _re
+        from pathlib import Path as _Path
+
+        patient_id = _patient_id_for(request)
+        if patient_id is None:
+            return Response(
+                {"success": False, "message": "Patient profile not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        requested = request.query_params.get("path") or ""
+        expected_prefix = f"patient-reports/{patient_id}/"
+        if not requested.startswith(expected_prefix) or ".." in requested.split("/"):
+            return Response(
+                {"success": False, "message": "Not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        abs_path = _Path(settings.BASE_DIR) / "media" / requested
+        if not abs_path.resolve().is_relative_to((_Path(settings.BASE_DIR) / "media").resolve()):
+            return Response(
+                {"success": False, "message": "Not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not abs_path.is_file():
+            return Response(
+                {"success": False, "message": "Not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        ext = abs_path.suffix.lower()
+        content_type = self.content_types.get(ext, "application/octet-stream")
+        response = FileResponse(open(abs_path, "rb"), content_type=content_type)
+        response["Content-Disposition"] = f'inline; filename="{abs_path.name}"'
+        return response

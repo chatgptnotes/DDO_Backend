@@ -26,7 +26,7 @@ from typing import Any
 
 from django.db import connection, transaction
 
-from core.supabase_admin import find_or_create_user
+from core.local_admin import find_or_create_local_user
 from surgeonpilot.availability import create_default_availability
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ def create_doctor_profile(
     if not email:
         raise ValueError("email is required")
 
-    auth_user, was_new = find_or_create_user(email)
+    auth_user, was_new = find_or_create_local_user(email)
     user_id = auth_user.id
 
     role_granted = _grant_doctor_role(

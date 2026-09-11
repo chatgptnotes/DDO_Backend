@@ -153,13 +153,13 @@ def test_existing_user_path_is_success(api_client, make_token, patch_roles, monk
 
 
 @pytest.mark.django_db
-def test_supabase_failure_returns_502(api_client, make_token, patch_roles, monkeypatch):
-    from core.supabase_admin import SupabaseAdminError
+def test_provisioning_failure_returns_502(api_client, make_token, patch_roles, monkeypatch):
+    from core.local_admin import LocalProvisioningError
 
     patch_roles("admin-1", ["clinical_admin"])
 
     def _boom(*, caller_user_id, payload, scope_id=None):
-        raise SupabaseAdminError(status=500, body="upstream down")
+        raise LocalProvisioningError("provisioning down")
 
     monkeypatch.setattr("aidoccall.views.create_doctor_profile", _boom)
     api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {make_token(sub='admin-1')}")
