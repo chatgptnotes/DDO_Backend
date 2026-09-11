@@ -33,7 +33,6 @@ from core.auth_views import (
     LoginView,
     LogoutView,
     PatientOtpRequestView,
-    PatientOtpVerifyView,
 )
 
 urlpatterns = [
@@ -57,7 +56,6 @@ urlpatterns = [
     path("api/auth/login/", LoginView.as_view(), name="login"),
     path("api/auth/logout/", LogoutView.as_view(), name="logout"),
     path("api/auth/otp/request/", PatientOtpRequestView.as_view(), name="patient_otp_request"),
-    path("api/auth/otp/verify/", PatientOtpVerifyView.as_view(), name="patient_otp_verify"),
     path("api/surgeon/", include("surgeonpilot.urls")),
     path("api/aidoccall/", include("aidoccall.urls")),
     path("api/payments/", include("payments.urls")),

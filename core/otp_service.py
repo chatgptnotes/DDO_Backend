@@ -27,8 +27,7 @@ from django.conf import settings
 from django.db import connection
 from django.utils import timezone
 
-PURPOSE_REGISTER = "register"
-PURPOSE_LOGIN = "login"
+PURPOSE_REGISTER = "register"   # OTP exists only for account creation
 
 CODE_TTL_SECONDS = 300          # OTP valid for 5 minutes
 RESEND_COOLDOWN_SECONDS = 60    # min gap between sends to the same number
@@ -252,12 +251,19 @@ def evaluate_verification(challenge: dict, code: str, now=None) -> tuple[str, bo
     return "invalid", False
 
 
-def verify_challenge(request_id: str, purpose: str, code: str, now=None) -> tuple[str, dict | None]:
+def verify_challenge(request_id: str, purpose: str, code: str, now=None,
+                     consume_on_ok: bool = True) -> tuple[str, dict | None]:
     """Fetch + evaluate + persist one verification attempt.
 
     Returns (status, challenge). The challenge row is returned for successful
     verifications so the caller can read the bound email/user_id; on failure
     the challenge is None and the status explains why.
+
+    consume_on_ok=False defers consumption: a correct code does NOT burn the
+    challenge (attempts still count). The caller must then call
+    consume_challenge() once its own success path completes — e.g. after the
+    registration actually saves — so a validation failure leaves the same
+    code retryable instead of costing a new SMS.
     """
     now = now or timezone.now()
     challenge = get_challenge(request_id, purpose)
@@ -267,7 +273,14 @@ def verify_challenge(request_id: str, purpose: str, code: str, now=None) -> tupl
     status, consume = evaluate_verification(challenge, code, now=now)
 
     with connection.cursor() as cur:
-        if status == "ok":
+        if status == "ok" and not consume_on_ok:
+            cur.execute(
+                """UPDATE patient_otp_challenges
+                      SET attempts = attempts + 1
+                    WHERE id = %s::uuid""",
+                [request_id],
+            )
+        elif status == "ok":
             cur.execute(
                 """UPDATE patient_otp_challenges
                       SET consumed_at = %s, attempts = attempts + 1
@@ -292,3 +305,15 @@ def verify_challenge(request_id: str, purpose: str, code: str, now=None) -> tupl
     if status != "ok":
         return status, None
     return "ok", challenge
+
+
+def consume_challenge(request_id: str, now=None) -> None:
+    """Burn a challenge after the caller's success path. Idempotent."""
+    now = now or timezone.now()
+    with connection.cursor() as cur:
+        cur.execute(
+            """UPDATE patient_otp_challenges
+                  SET consumed_at = %s
+                WHERE id = %s::uuid AND consumed_at IS NULL""",
+            [now, request_id],
+        )

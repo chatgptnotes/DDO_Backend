@@ -142,23 +142,24 @@ def test_request_register_otp_email_taken(client, monkeypatch):
     assert resp.status_code == 409
 
 
-def test_request_login_otp_unknown_phone(client, monkeypatch):
+def test_request_otp_rejects_login_purpose(client, monkeypatch):
+    """Sign-in never uses OTP — only account creation does."""
     _patch_issue(monkeypatch)
-    monkeypatch.setattr("core.auth_views._find_patient_by_phone", lambda phone: None)
     resp = client.post(
         "/api/auth/otp/request/",
         {"phone": "+919800000000", "purpose": "login"},
         format="json",
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 400
 
 
 def test_request_otp_resend_cooldown(client, monkeypatch):
     from core.otp_service import CooldownError
 
     monkeypatch.setattr(
-        "core.auth_views._find_patient_by_phone",
-        lambda phone: ("22222222-2222-2222-2222-222222222222", "p@patient.com", "+919876543210"),
+        "core.auth_views.get_user_model",
+        lambda: SimpleNamespace(objects=SimpleNamespace(
+            filter=lambda **kw: SimpleNamespace(exists=lambda: False))),
     )
 
     def raise_cooldown(phone_, purpose_, **kw):
@@ -167,7 +168,7 @@ def test_request_otp_resend_cooldown(client, monkeypatch):
     monkeypatch.setattr("core.auth_views.issue_challenge", raise_cooldown)
     resp = client.post(
         "/api/auth/otp/request/",
-        {"phone": "+919876543210", "purpose": "login"},
+        {"phone": "+919876543210", "purpose": "register", "email": "new@patient.com"},
         format="json",
     )
     assert resp.status_code == 429
@@ -178,8 +179,9 @@ def test_request_otp_send_limit(client, monkeypatch):
     from core.otp_service import SendLimitError
 
     monkeypatch.setattr(
-        "core.auth_views._find_patient_by_phone",
-        lambda phone: ("22222222-2222-2222-2222-222222222222", "p@patient.com", "+919876543210"),
+        "core.auth_views.get_user_model",
+        lambda: SimpleNamespace(objects=SimpleNamespace(
+            filter=lambda **kw: SimpleNamespace(exists=lambda: False))),
     )
 
     def raise_limit(phone_, purpose_, **kw):
@@ -188,7 +190,7 @@ def test_request_otp_send_limit(client, monkeypatch):
     monkeypatch.setattr("core.auth_views.issue_challenge", raise_limit)
     resp = client.post(
         "/api/auth/otp/request/",
-        {"phone": "+919876543210", "purpose": "login"},
+        {"phone": "+919876543210", "purpose": "register", "email": "new@patient.com"},
         format="json",
     )
     assert resp.status_code == 429
@@ -197,8 +199,9 @@ def test_request_otp_send_limit(client, monkeypatch):
 def test_request_otp_twilio_unconfigured(client, monkeypatch):
     _patch_issue(monkeypatch)
     monkeypatch.setattr(
-        "core.auth_views._find_patient_by_phone",
-        lambda phone: ("22222222-2222-2222-2222-222222222222", "p@patient.com", "+919876543210"),
+        "core.auth_views.get_user_model",
+        lambda: SimpleNamespace(objects=SimpleNamespace(
+            filter=lambda **kw: SimpleNamespace(exists=lambda: False))),
     )
     monkeypatch.setattr(
         "core.auth_views._send_otp_sms",
@@ -206,141 +209,33 @@ def test_request_otp_twilio_unconfigured(client, monkeypatch):
     )
     resp = client.post(
         "/api/auth/otp/request/",
-        {"phone": "+919876543210", "purpose": "login"},
+        {"phone": "+919876543210", "purpose": "register", "email": "new@patient.com"},
         format="json",
     )
     assert resp.status_code == 503
 
 
-# ------------------------------------------------------- login verification
-
 def _patch_verify(monkeypatch, status_, challenge=None):
-    """Patch verify_challenge in BOTH consumer modules."""
-    for module in ("core.auth_views", "core.patient_views"):
-        monkeypatch.setattr(
-            f"{module}.verify_challenge",
-            lambda rid, purpose, code, s=status_, c=challenge: (s, c),
-        )
-
-
-def test_verify_login_success_opens_session(client, monkeypatch):
-    challenge = {
-        "request_id": "r1", "phone": "+919876543210", "purpose": "login",
-        "email": "p@patient.com", "user_id": "22222222-2222-2222-2222-222222222222",
-        "code_hash": "x", "attempts": 4, "consumed_at": None,
-        "expires_at": timezone.now(),
-    }
-    _patch_verify(monkeypatch, "ok", challenge)
-    fake_user = SimpleNamespace(
-        id=challenge["user_id"], email="p@patient.com",
-        full_name="Test Patient", role="patient",
-    )
+    """Patch verify_challenge in the register view, and its deferred
+    consume_challenge as a counting no-op (returned for asserts)."""
     monkeypatch.setattr(
-        "core.auth_views.get_user_model",
-        lambda: SimpleNamespace(objects=SimpleNamespace(
-            get=lambda **kw: fake_user)),
+        "core.patient_views.verify_challenge",
+        lambda rid, purpose, code, s=status_, c=challenge, **kw: (s, c),
     )
-    logged_in = {}
+    consumed = {"count": 0}
     monkeypatch.setattr(
-        "core.auth_views.login",
-        lambda request, user, **kw: logged_in.update(user=user),
+        "core.patient_views.consume_challenge",
+        lambda rid, **kw: consumed.__setitem__("count", consumed["count"] + 1),
     )
-
-    resp = client.post(
-        "/api/auth/otp/verify/",
-        {"request_id": "r1", "code": "123456"},
-        format="json",
-    )
-    assert resp.status_code == 200
-    assert resp.json()["data"]["role"] == "patient"
-    assert logged_in["user"] is fake_user
+    return consumed
 
 
-def test_verify_login_invalid_code(client, monkeypatch):
-    _patch_verify(monkeypatch, "invalid")
-    resp = client.post(
-        "/api/auth/otp/verify/", {"request_id": "r1", "code": "000000"},
-        format="json",
-    )
-    assert resp.status_code == 400
-    assert "Incorrect" in resp.json()["message"]
+# ----------------------------------------------- password-only patient login
 
-
-def test_verify_login_expired(client, monkeypatch):
-    _patch_verify(monkeypatch, "expired")
-    resp = client.post(
-        "/api/auth/otp/verify/", {"request_id": "r1", "code": "123456"},
-        format="json",
-    )
-    assert resp.status_code == 400
-    assert "expired" in resp.json()["message"]
-
-
-def test_verify_login_reused(client, monkeypatch):
-    _patch_verify(monkeypatch, "used")
-    resp = client.post(
-        "/api/auth/otp/verify/", {"request_id": "r1", "code": "123456"},
-        format="json",
-    )
-    assert resp.status_code == 400
-    assert "already used" in resp.json()["message"]
-
-
-def test_verify_login_locked_after_too_many_attempts(client, monkeypatch):
-    _patch_verify(monkeypatch, "locked")
-    resp = client.post(
-        "/api/auth/otp/verify/", {"request_id": "r1", "code": "123456"},
-        format="json",
-    )
-    assert resp.status_code == 429
-    assert "Too many" in resp.json()["message"]
-
-
-def test_verify_login_unknown_request(client, monkeypatch):
-    _patch_verify(monkeypatch, "not_found")
-    resp = client.post(
-        "/api/auth/otp/verify/", {"request_id": "nope", "code": "123456"},
-        format="json",
-    )
-    assert resp.status_code == 404
-
-
-# ------------------------------------------------ no-phone legacy fallback
-
-def test_login_patient_without_phone_falls_back_to_password(client, monkeypatch):
-    """Accounts created before phone capture have no number to OTP — they keep
-    the legacy password-only session login (requirement: don't break existing
-    login). A flag tells the portal to prompt for a number."""
-    fake_user = SimpleNamespace(
-        id="44444444-4444-4444-4444-444444444444", email="legacy@patient.com",
-        full_name="Legacy Patient", role="patient", phone="",
-    )
-    monkeypatch.setattr(
-        "core.auth_views.authenticate",
-        lambda request, **kw: fake_user,
-    )
-    monkeypatch.setattr(
-        "core.auth_views.normalize_phone", lambda p: None,
-    )
-    logged_in = {}
-    monkeypatch.setattr(
-        "core.auth_views.login",
-        lambda request, user, **kw: logged_in.update(user=user),
-    )
-
-    resp = client.post(
-        "/api/auth/login/",
-        {"email": "legacy@patient.com", "password": "Whatever1!"},
-        format="json",
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["success"] is True
-    assert body["phone_on_file"] is False
-    assert logged_in["user"] is fake_user
-
-
-def test_login_patient_with_phone_requires_otp(client, monkeypatch):
+def test_login_patient_password_only_opens_session(client, monkeypatch):
+    """Patients sign in with just email + password: the session opens in the
+    login response and NO SMS OTP is involved (OTP is registration-time
+    mobile verification only)."""
     fake_user = SimpleNamespace(
         id="55555555-5555-5555-5555-555555555555", email="p@patient.com",
         full_name="OTP Patient", role="patient", phone="+919876543210",
@@ -348,20 +243,15 @@ def test_login_patient_with_phone_requires_otp(client, monkeypatch):
     monkeypatch.setattr(
         "core.auth_views.authenticate", lambda request, **kw: fake_user,
     )
-    monkeypatch.setattr("core.auth_views.normalize_phone", lambda p: "+919876543210")
 
-    challenge = {
-        "request_id": "r9", "phone": "+919876543210", "phone_masked": "******4321",
-        "expires_in": 300, "resend_after": 60, "code": "999999",
-    }
-    monkeypatch.setattr("core.auth_views.issue_challenge", lambda phone, purpose, **kw: challenge)
-    monkeypatch.setattr(
-        "core.auth_views._send_otp_sms", lambda phone_, code_: (True, None),
-    )
-    login_called = {}
+    def no_challenge(phone, purpose, **kw):
+        raise AssertionError("login must not issue an OTP challenge")
+
+    monkeypatch.setattr("core.auth_views.issue_challenge", no_challenge)
+    logged_in = {}
     monkeypatch.setattr(
         "core.auth_views.login",
-        lambda request, user, **kw: login_called.update(user=user),
+        lambda request, user, **kw: logged_in.update(user=user),
     )
 
     resp = client.post(
@@ -371,10 +261,9 @@ def test_login_patient_with_phone_requires_otp(client, monkeypatch):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["otp_required"] is True
-    assert body["request_id"] == "r9"
-    # No session may be opened before OTP verification
-    assert login_called == {}
+    assert body["success"] is True
+    assert "otp_required" not in body
+    assert logged_in["user"] is fake_user
 
 
 # ---------------------------------------------------- registration gating
@@ -406,7 +295,7 @@ def test_register_phone_mismatch_rejected(client, monkeypatch):
         "email": "new@patient.com", "user_id": None, "code_hash": "x",
         "attempts": 4, "consumed_at": None, "expires_at": timezone.now(),
     }
-    _patch_verify(monkeypatch, "ok", challenge)
+    consumed = _patch_verify(monkeypatch, "ok", challenge)
     monkeypatch.setattr(
         "core.patient_views.PatientRegistrationSerializer",
         lambda *a, **kw: (_ for _ in ()).throw(
@@ -422,6 +311,7 @@ def test_register_phone_mismatch_rejected(client, monkeypatch):
     )
     assert resp.status_code == 400
     assert "different mobile number" in resp.json()["message"]
+    assert consumed["count"] == 0  # challenge NOT burned on failure
 
 
 def test_register_success_after_otp(client, monkeypatch):
@@ -430,7 +320,7 @@ def test_register_success_after_otp(client, monkeypatch):
         "email": "new@patient.com", "user_id": None, "code_hash": "x",
         "attempts": 0, "consumed_at": None, "expires_at": timezone.now(),
     }
-    _patch_verify(monkeypatch, "ok", challenge)
+    consumed = _patch_verify(monkeypatch, "ok", challenge)
 
     saved = {}
     fake_user = SimpleNamespace(
@@ -466,6 +356,7 @@ def test_register_success_after_otp(client, monkeypatch):
     assert saved["saved"] is True
     assert saved["data"]["email"] == "new@patient.com"
     assert saved["data"]["phone"] == "+919876543210"
+    assert consumed["count"] == 1  # burned exactly once, after success
 
 
 def test_register_expired_otp_rejected(client, monkeypatch):

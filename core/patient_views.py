@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 
 from .models import DocPatient, UserRole
 from .serializers import PatientRegistrationSerializer
-from core.otp_service import normalize_phone, verify_challenge
+from core.otp_service import consume_challenge, normalize_phone, verify_challenge
 
 OTP_VERIFY_HTTP = {
     "not_found": 404,
@@ -215,7 +215,11 @@ class PatientRegisterView(APIView):
                            'submit it together with your registration details.',
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        otp_status, challenge = verify_challenge(otp_request_id, "register", otp_code)
+        # Verified but NOT consumed yet: the code stays retryable until the
+        # account actually saves, so a validation error (e.g. a password the
+        # similarity validator rejects) does not force a new SMS.
+        otp_status, challenge = verify_challenge(
+            otp_request_id, "register", otp_code, consume_on_ok=False)
         if otp_status != "ok" or challenge is None:
             return Response({
                 'success': False,
@@ -245,6 +249,7 @@ class PatientRegisterView(APIView):
             and str(body.get("email") or "").strip().lower() == str(session_user.email).strip().lower()
             and _link_patient_profile(session_user, body)
         ):
+            consume_challenge(otp_request_id)
             return Response({
                 'success': True,
                 'message': 'Patient profile linked successfully',
@@ -261,6 +266,7 @@ class PatientRegisterView(APIView):
 
         if serializer.is_valid():
             user = serializer.save()
+            consume_challenge(otp_request_id)  # burn only on success
             return Response({
                 'success': True,
                 'message': 'Patient registered successfully',
