@@ -24,9 +24,11 @@ Design principles
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
+import stripe
 from django.conf import settings
 from django.db import connection, transaction
 
@@ -177,7 +179,48 @@ def create_intent_for_appointment(
         create_kwargs["transfer_data"] = {"destination": connected_account_id}
 
     stripe = get_stripe()
-    intent = stripe.PaymentIntent.create(**create_kwargs)
+    try:
+        intent = stripe.PaymentIntent.create(**create_kwargs)
+    except stripe.APIError as exc:
+        # Double-submit: a concurrent request is still creating the exact same
+        # intent under the same idempotency key. Retrying with the SAME key
+        # returns that request's intent — never a duplicate — so back off and
+        # retry instead of leaking a 500 to the patient.
+        if "in-progress request using this idempotent key" not in str(exc).lower():
+            raise
+        logger.info(
+            "Idempotency key %s still in flight at Stripe — backing off and retrying",
+            idempotency_key,
+        )
+        intent = None
+        for wait_seconds in (1, 2, 4):
+            time.sleep(wait_seconds)
+            try:
+                intent = stripe.PaymentIntent.create(**create_kwargs)
+                break
+            except stripe.APIError:
+                continue
+        if intent is None:
+            raise
+        # The retry can land on the concurrent request's intent; keep exactly
+        # one local row per Stripe intent.
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT id::text FROM public.doc_payment_intents "
+                "WHERE stripe_payment_intent_id = %s LIMIT 1",
+                [intent.id],
+            )
+            twin = cur.fetchone()
+        if twin is not None:
+            return IntentPayload(
+                intent_id=str(twin[0]),
+                stripe_payment_intent_id=intent.id,
+                client_secret=intent.client_secret,
+                publishable_key=settings.STRIPE_PUBLISHABLE_KEY,
+                amount_cents=int(intent.amount),
+                currency=intent.currency,
+                status=intent.status,
+            )
 
     new_id = _insert_intent_row(
         appointment_id=appointment_id,
